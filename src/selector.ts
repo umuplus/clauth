@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import type { ProfileInfo } from "./profiles.js";
+import { printHeader, formatProfileLine } from "./ui.js";
 
 export function selectProfile(
   profiles: ProfileInfo[]
@@ -7,32 +8,28 @@ export function selectProfile(
   return new Promise((resolve) => {
     let index = 0;
     const { stdin, stdout } = process;
+    const maxNameLen = Math.max(...profiles.map((p) => p.name.length));
 
     stdout.write("\x1B[?25l"); // hide cursor
 
-    function formatLine(i: number): string {
-      const p = profiles[i];
-      const cursor = i === index ? chalk.cyan("❯") : " ";
-      const dot = p.authenticated ? chalk.green("●") : chalk.dim("○");
-      const name =
-        i === index ? chalk.cyan.bold(p.name) : chalk.white(p.name);
-      const auth = p.authenticated ? chalk.dim(" authenticated") : "";
-      return `  ${cursor} ${dot} ${name}${auth}`;
-    }
+    // Header
+    printHeader();
+    const headerLines = 7; // header box + surrounding blank lines
 
     function render(initial: boolean): void {
       if (!initial) {
-        stdout.write(`\x1B[${profiles.length}A`);
+        stdout.write(`\x1B[${profiles.length + 2}A`);
       }
+      stdout.write(
+        `\x1B[2K  ${chalk.dim("↑↓ navigate · enter select · q quit")}\n\n`
+      );
       for (let i = 0; i < profiles.length; i++) {
-        stdout.write(`\x1B[2K${formatLine(i)}\n`);
+        stdout.write(
+          `\x1B[2K${formatProfileLine(profiles[i], { selected: i === index, maxNameLen })}\n`
+        );
       }
     }
 
-    // Header
-    stdout.write(
-      `\n  ${chalk.bold("Select a profile")}  ${chalk.dim("↑↓ navigate · enter select · q quit")}\n\n`
-    );
     render(true);
 
     stdin.setRawMode(true);

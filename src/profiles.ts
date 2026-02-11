@@ -84,9 +84,29 @@ export async function setConfig(
   return config;
 }
 
+// --- last used ---
+
+const LAST_FILE = join(CLAUTH_DIR, ".last");
+
+export async function getLastUsed(): Promise<string | null> {
+  try {
+    const name = (await readFile(LAST_FILE, "utf8")).trim();
+    if (name && (await profileExists(name))) return name;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setLastUsed(name: string): Promise<void> {
+  await ensureClauthDir();
+  await writeFile(LAST_FILE, name + "\n");
+}
+
 export interface ProfileInfo {
   name: string;
   authenticated: boolean;
+  config: ProfileConfig;
 }
 
 export async function getProfilesWithStatus(): Promise<ProfileInfo[]> {
@@ -95,6 +115,7 @@ export async function getProfilesWithStatus(): Promise<ProfileInfo[]> {
     names.map(async (name) => ({
       name,
       authenticated: await hasAuth(name),
+      config: await getConfig(name),
     }))
   );
 }

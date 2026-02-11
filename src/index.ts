@@ -13,9 +13,12 @@ import {
   getProfileDir,
   getConfig,
   setConfig,
+  getLastUsed,
+  setLastUsed,
   isValidName,
 } from "./profiles.js";
 import { selectProfile } from "./selector.js";
+import { printHeader, formatProfileLine, printLaunchBanner } from "./ui.js";
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -34,7 +37,7 @@ program
 // --- add ---
 program
   .command("add <name>")
-  .description("Create a new profile and launch claude login")
+  .description("Create a new profile")
   .action(async (name: string) => {
     if (!isValidName(name)) {
       console.log(
@@ -52,34 +55,8 @@ program
 
     await createProfile(name);
     console.log(chalk.green(`  ✓ Created profile "${name}"`));
-    console.log(chalk.dim(`    ${getProfileDir(name)}`));
-    console.log();
-    console.log(chalk.blue("  Launching claude login...\n"));
-
-    const child = spawn("claude", ["/login"], {
-      env: { ...process.env, CLAUDE_CONFIG_DIR: getProfileDir(name) },
-      stdio: "inherit",
-    });
-
-    child.on("error", (err) => {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        console.log(
-          chalk.red(
-            "  Error: claude CLI not found. Make sure it's installed and in your PATH."
-          )
-        );
-      } else {
-        console.log(chalk.red(`  Error: ${err.message}`));
-      }
-      process.exit(1);
-    });
-
-    child.on("close", (code) => {
-      if (code === 0) {
-        console.log(chalk.green(`\n  ✓ Profile "${name}" is ready!`));
-      }
-      process.exit(code ?? 0);
-    });
+    console.log(chalk.dim(`    ${getProfileDir(name)}\n`));
+    console.log(`  Launch with ${chalk.cyan(`clauth use ${name}`)} — Claude will prompt to log in on first run.`);
   });
 
 // --- remove ---
@@ -125,14 +102,11 @@ program
       return;
     }
 
-    console.log(chalk.bold("\n  Profiles\n"));
+    printHeader();
 
+    const maxNameLen = Math.max(...profiles.map((p) => p.name.length));
     for (const p of profiles) {
-      const dot = p.authenticated ? chalk.green("●") : chalk.dim("○");
-      const status = p.authenticated
-        ? chalk.green("authenticated")
-        : chalk.dim("no auth");
-      console.log(`  ${dot} ${chalk.bold(p.name)}  ${status}`);
+      console.log(formatProfileLine(p, { maxNameLen }));
     }
     console.log();
   });
@@ -179,19 +153,6 @@ program
 
 // --- helpers ---
 
-function printBanner(name: string): void {
-  const label = `Profile: ${name}`;
-  const pad = 2;
-  const inner = label.length + pad * 2;
-  console.log(chalk.cyan(`\n  ╭${"─".repeat(inner)}╮`));
-  console.log(
-    chalk.cyan(
-      `  │${" ".repeat(pad)}${chalk.bold.white(label)}${" ".repeat(pad)}│`
-    )
-  );
-  console.log(chalk.cyan(`  ╰${"─".repeat(inner)}╯\n`));
-}
-
 async function launchClaude(name: string, args: string[]): Promise<void> {
   if (!(await profileExists(name))) {
     console.log(chalk.red(`\n  Profile "${name}" does not exist.`));
@@ -203,11 +164,14 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
 
   const config = await getConfig(name);
   const configArgs: string[] = [];
+  const flags: string[] = [];
   if (config.skipPermissions) {
     configArgs.push("--dangerously-skip-permissions");
+    flags.push("skip-permissions");
   }
 
-  printBanner(name);
+  await setLastUsed(name);
+  printLaunchBanner(name, flags);
 
   const child = spawn("claude", [...configArgs, ...args], {
     env: { ...process.env, CLAUDE_CONFIG_DIR: getProfileDir(name) },
@@ -231,9 +195,16 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
 // --- entry point ---
 
 if (argv.length <= 2) {
-  // No subcommand → interactive selector
+  // No subcommand → last used profile, or interactive selector
   (async () => {
     await ensureClauthDir();
+
+    const last = await getLastUsed();
+    if (last) {
+      await launchClaude(last, []);
+      return;
+    }
+
     const profiles = await getProfilesWithStatus();
 
     if (profiles.length === 0) {
