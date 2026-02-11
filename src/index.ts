@@ -23,6 +23,7 @@ import {
 import { selectProfile } from "./selector.js";
 import { printHeader, formatProfileLine, printLaunchBanner } from "./ui.js";
 import { showAllStats, showProfileStats } from "./stats.js";
+import { runSetup } from "./setup.js";
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -168,6 +169,14 @@ program
     } else {
       await showAllStats();
     }
+  });
+
+// --- setup ---
+program
+  .command("setup")
+  .description("Guided profile setup wizard")
+  .action(async () => {
+    await runSetup();
   });
 
 // --- use ---
