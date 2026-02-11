@@ -6,7 +6,7 @@ Build a Node.js CLI tool called `clauth` (Claude + Auth) for managing multiple C
 - `clauth add <name>` — Create a new profile (creates config dir, runs `claude /login` with that config dir)
 - `clauth remove <name>` — Delete a profile and its config dir (with confirmation)
 - `clauth list` — Show all profiles, highlight which ones have active auth
-- `clauth use <name> [-- ...args]` — Launch `claude` with the selected profile's config dir, forwarding any extra args
+- `clauth launch <name> [-- ...args]` — Launch `claude` with the selected profile's config dir, forwarding any extra args
 - `clauth` (no args) — Interactive profile selector with arrow keys, then launches claude
 
 **UX requirements:**

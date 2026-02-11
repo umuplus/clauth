@@ -3,10 +3,13 @@ import type { ProfileInfo } from "./profiles.js";
 import { printHeader, formatProfileLine } from "./ui.js";
 
 export function selectProfile(
-  profiles: ProfileInfo[]
+  profiles: ProfileInfo[],
+  preselect?: string
 ): Promise<string | null> {
   return new Promise((resolve) => {
-    let index = 0;
+    let index = preselect
+      ? Math.max(0, profiles.findIndex((p) => p.name === preselect))
+      : 0;
     const { stdin, stdout } = process;
     const maxNameLen = Math.max(...profiles.map((p) => p.name.length));
 

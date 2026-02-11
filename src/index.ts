@@ -17,6 +17,8 @@ import {
   setConfig,
   getLastUsed,
   setLastUsed,
+  getFolderProfile,
+  setFolderProfile,
   isValidName,
   isReservedName,
 } from "./profiles.js";
@@ -70,7 +72,7 @@ program
     await createProfile(name);
     console.log(chalk.green(`  ✓ Created profile "${name}"`));
     console.log(chalk.dim(`    ${getProfileDir(name)}\n`));
-    console.log(`  Launch with ${chalk.cyan(`clauth use ${name}`)} — Claude will prompt to log in on first run.`);
+    console.log(`  Launch with ${chalk.cyan(`clauth launch ${name}`)} — Claude will prompt to log in on first run.`);
   });
 
 // --- remove ---
@@ -179,13 +181,14 @@ program
     await runSetup();
   });
 
-// --- use ---
+// --- launch ---
 program
-  .command("use [name]")
-  .description("Launch claude with a profile (defaults to last used)")
+  .command("launch [name]")
+  .description("Launch claude with a profile (defaults to folder/last used)")
   .action(async (name?: string) => {
     if (!name) {
-      const last = await getLastUsed();
+      const folder = await getFolderProfile();
+      const last = folder ?? (await getLastUsed());
       if (!last) {
         console.log(chalk.dim("\n  No last used profile. Run: clauth switch\n"));
         process.exit(1);
@@ -215,6 +218,7 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   }
 
   await setLastUsed(name);
+  await setFolderProfile(name);
   printLaunchBanner(name, flags);
 
   const claudeDir = getClaudeConfigDir(name);
@@ -255,9 +259,10 @@ async function interactiveSelect(): Promise<void> {
     process.exit(0);
   }
 
-  const selected = await selectProfile(profiles);
+  const preselect = await getFolderProfile();
+  const selected = await selectProfile(profiles, preselect ?? undefined);
   if (selected) {
-    await launchClaude(selected, []);
+    await launchClaude(selected, passthroughArgs);
   }
 }
 

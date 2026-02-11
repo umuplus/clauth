@@ -93,5 +93,5 @@ export async function runSetup(): Promise<void> {
     console.log(formatProfileLine(p, { maxNameLen }));
   }
   console.log();
-  console.log(`  Launch a profile with: ${chalk.cyan("clauth use <name>")}\n`);
+  console.log(`  Launch a profile with: ${chalk.cyan("clauth launch <name>")}\n`);
 }

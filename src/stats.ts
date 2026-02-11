@@ -84,7 +84,7 @@ export async function showProfileStats(name: string): Promise<void> {
 
   const stats = await getStats(name);
   if (!stats) {
-    console.log(chalk.dim(`\n  No usage data yet for "${name}". Launch it first with: clauth use ${name}\n`));
+    console.log(chalk.dim(`\n  No usage data yet for "${name}". Launch it first with: clauth launch ${name}\n`));
     return;
   }
 

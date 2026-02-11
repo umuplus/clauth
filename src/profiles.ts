@@ -121,6 +121,34 @@ export async function setConfig(
   return config;
 }
 
+// --- folder mapping ---
+
+const FOLDERS_FILE = join(CLAUTH_DIR, "folders.json");
+
+async function readFolders(): Promise<Record<string, string>> {
+  try {
+    const data = await readFile(FOLDERS_FILE, "utf8");
+    return JSON.parse(data) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+export async function getFolderProfile(): Promise<string | null> {
+  const cwd = process.cwd();
+  const folders = await readFolders();
+  const name = folders[cwd];
+  if (name && (await profileExists(name))) return name;
+  return null;
+}
+
+export async function setFolderProfile(name: string): Promise<void> {
+  await ensureClauthDir();
+  const folders = await readFolders();
+  folders[process.cwd()] = name;
+  await writeFile(FOLDERS_FILE, JSON.stringify(folders, null, 2) + "\n");
+}
+
 // --- last used ---
 
 const LAST_FILE = join(CLAUTH_DIR, ".last");
