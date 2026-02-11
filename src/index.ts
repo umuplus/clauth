@@ -172,9 +172,17 @@ program
 
 // --- use ---
 program
-  .command("use <name>")
-  .description("Launch claude with the selected profile")
-  .action((name: string) => {
+  .command("use [name]")
+  .description("Launch claude with a profile (defaults to last used)")
+  .action(async (name?: string) => {
+    if (!name) {
+      const last = await getLastUsed();
+      if (!last) {
+        console.log(chalk.dim("\n  No last used profile. Run: clauth switch\n"));
+        process.exit(1);
+      }
+      name = last;
+    }
     launchClaude(name, passthroughArgs);
   });
 
@@ -226,32 +234,31 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   });
 }
 
+// --- helpers ---
+
+async function interactiveSelect(): Promise<void> {
+  const profiles = await getProfilesWithStatus();
+
+  if (profiles.length === 0) {
+    console.log(
+      chalk.dim("\n  No profiles yet. Create one with: clauth add <name>\n")
+    );
+    process.exit(0);
+  }
+
+  const selected = await selectProfile(profiles);
+  if (selected) {
+    await launchClaude(selected, []);
+  }
+}
+
 // --- entry point ---
 
 if (argv.length <= 2) {
-  // No subcommand → last used profile, or interactive selector
+  // No subcommand → always show interactive selector
   (async () => {
     await ensureDefaultProfile();
-
-    const last = await getLastUsed();
-    if (last) {
-      await launchClaude(last, []);
-      return;
-    }
-
-    const profiles = await getProfilesWithStatus();
-
-    if (profiles.length === 0) {
-      console.log(
-        chalk.dim("\n  No profiles yet. Create one with: clauth add <name>\n")
-      );
-      process.exit(0);
-    }
-
-    const selected = await selectProfile(profiles);
-    if (selected) {
-      await launchClaude(selected, []);
-    }
+    await interactiveSelect();
   })();
 } else {
   ensureDefaultProfile().then(() => program.parse(argv));
