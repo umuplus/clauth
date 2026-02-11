@@ -54,21 +54,25 @@ export async function showAllStats(): Promise<void> {
       border: ["dim"],
       compact: false,
     },
-    head: ["Profile", "Sessions", "Messages", "Tokens (out)", "First Used"],
+    head: ["Profile", "Sessions", "Messages", "Tokens (out)", "First Used", "Last Active"],
   });
 
   for (const name of names) {
     const stats = await getStats(name);
     if (!stats) {
-      table.push([name, chalk.dim("—"), chalk.dim("—"), chalk.dim("—"), chalk.dim("—")]);
+      table.push([name, chalk.dim("—"), chalk.dim("—"), chalk.dim("—"), chalk.dim("—"), chalk.dim("—")]);
       continue;
     }
+    const lastActive = stats.dailyActivity.length > 0
+      ? stats.dailyActivity[stats.dailyActivity.length - 1].date
+      : undefined;
     table.push([
       chalk.bold(name),
       formatNum(stats.totalSessions),
       formatNum(stats.totalMessages),
       formatTokens(totalOutputTokens(stats)),
       stats.firstSessionDate ? formatDate(stats.firstSessionDate) : chalk.dim("—"),
+      lastActive ? formatDate(lastActive) : chalk.dim("—"),
     ]);
   }
 

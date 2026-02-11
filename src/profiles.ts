@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir, readdir, rm, access, readFile, writeFile } from "node:fs/promises";
+import { computeStatsFromSessions } from "./compute-stats.js";
 
 const CLAUTH_DIR = join(homedir(), ".clauth");
 const DEFAULT_CLAUDE_DIR = join(homedir(), ".claude");
@@ -199,12 +200,14 @@ export interface StatsCache {
 }
 
 export async function getStats(name: string): Promise<StatsCache | null> {
-  const file = join(getClaudeConfigDir(name), "stats-cache.json");
+  const dir = getClaudeConfigDir(name);
+  const file = join(dir, "stats-cache.json");
   try {
     const data = await readFile(file, "utf8");
     return JSON.parse(data) as StatsCache;
   } catch {
-    return null;
+    // No stats-cache.json — compute from session JSONL files
+    return computeStatsFromSessions(dir);
   }
 }
 
