@@ -6,16 +6,19 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import {
   ensureClauthDir,
+  ensureDefaultProfile,
   getProfilesWithStatus,
   profileExists,
   createProfile,
   removeProfile,
   getProfileDir,
+  getClaudeConfigDir,
   getConfig,
   setConfig,
   getLastUsed,
   setLastUsed,
   isValidName,
+  isReservedName,
 } from "./profiles.js";
 import { selectProfile } from "./selector.js";
 import { printHeader, formatProfileLine, printLaunchBanner } from "./ui.js";
@@ -49,8 +52,17 @@ program
       process.exit(1);
     }
 
+    if (isReservedName(name)) {
+      console.log(
+        chalk.red(
+          `  "${name}" is a reserved profile name. It's auto-created as a link to your existing Claude config.`
+        )
+      );
+      process.exit(1);
+    }
+
     if (await profileExists(name)) {
-      console.log(chalk.yellow(`  Profile "${name}" already exists.`));
+      console.log(chalk.yellow(`  Profile "${name}" already exists. Remove it first with: clauth remove ${name}`));
       return;
     }
 
@@ -70,23 +82,25 @@ program
       return;
     }
 
+    const isDefault = name === "default";
+    const prompt = isDefault
+      ? `Remove "default" profile? (Your ~/.claude config will not be deleted) [y/N] `
+      : `Delete profile "${name}" and all its data? [y/N] `;
+
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
     });
 
-    rl.question(
-      chalk.yellow(`  Delete profile "${name}" and all its data? [y/N] `),
-      async (answer) => {
-        rl.close();
-        if (answer.toLowerCase() === "y") {
-          await removeProfile(name);
-          console.log(chalk.green(`  ✓ Removed profile "${name}"`));
-        } else {
-          console.log(chalk.dim("  Cancelled."));
-        }
+    rl.question(chalk.yellow(`  ${prompt}`), async (answer) => {
+      rl.close();
+      if (answer.toLowerCase() === "y") {
+        await removeProfile(name);
+        console.log(chalk.green(`  ✓ Removed profile "${name}"`));
+      } else {
+        console.log(chalk.dim("  Cancelled."));
       }
-    );
+    });
   });
 
 // --- list ---
@@ -186,8 +200,15 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   await setLastUsed(name);
   printLaunchBanner(name, flags);
 
+  const claudeDir = getClaudeConfigDir(name);
+  const env = { ...process.env };
+  // Only set CLAUDE_CONFIG_DIR for non-default profiles
+  if (name !== "default") {
+    env.CLAUDE_CONFIG_DIR = claudeDir;
+  }
+
   const child = spawn("claude", [...configArgs, ...args], {
-    env: { ...process.env, CLAUDE_CONFIG_DIR: getProfileDir(name) },
+    env,
     stdio: "inherit",
   });
 
@@ -210,7 +231,7 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
 if (argv.length <= 2) {
   // No subcommand → last used profile, or interactive selector
   (async () => {
-    await ensureClauthDir();
+    await ensureDefaultProfile();
 
     const last = await getLastUsed();
     if (last) {
@@ -233,5 +254,5 @@ if (argv.length <= 2) {
     }
   })();
 } else {
-  program.parse(argv);
+  ensureDefaultProfile().then(() => program.parse(argv));
 }

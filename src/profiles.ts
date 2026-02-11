@@ -3,17 +3,31 @@ import { join } from "node:path";
 import { mkdir, readdir, rm, access, readFile, writeFile } from "node:fs/promises";
 
 const CLAUTH_DIR = join(homedir(), ".clauth");
+const DEFAULT_CLAUDE_DIR = join(homedir(), ".claude");
 
 export function getClauthDir(): string {
   return CLAUTH_DIR;
 }
 
+// Where clauth stores its own config (clauth.json) — always under ~/.clauth/<name>
 export function getProfileDir(name: string): string {
   return join(CLAUTH_DIR, name);
 }
 
+// Where Claude reads its config — ~/.claude for default, ~/.clauth/<name> for others
+export function getClaudeConfigDir(name: string): string {
+  if (name === "default") return DEFAULT_CLAUDE_DIR;
+  return join(CLAUTH_DIR, name);
+}
+
+export const RESERVED_NAMES = ["default"];
+
 export function isValidName(name: string): boolean {
   return /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name);
+}
+
+export function isReservedName(name: string): boolean {
+  return RESERVED_NAMES.includes(name.toLowerCase());
 }
 
 export async function ensureClauthDir(): Promise<void> {
@@ -46,8 +60,31 @@ export async function removeProfile(name: string): Promise<void> {
   await rm(getProfileDir(name), { recursive: true, force: true });
 }
 
+export async function ensureDefaultProfile(): Promise<void> {
+  await ensureClauthDir();
+  const defaultDir = getProfileDir("default");
+
+  // Check if default profile dir already exists
+  try {
+    await access(defaultDir);
+    return;
+  } catch {
+    // doesn't exist yet
+  }
+
+  // Check if ~/.claude exists before creating the default profile
+  try {
+    await access(DEFAULT_CLAUDE_DIR);
+  } catch {
+    return; // no existing claude config
+  }
+
+  // Create the default profile dir (just for storing clauth.json)
+  await mkdir(defaultDir, { recursive: true });
+}
+
 export async function hasAuth(name: string): Promise<boolean> {
-  const dir = getProfileDir(name);
+  const dir = getClaudeConfigDir(name);
   try {
     const entries = await readdir(dir);
     return entries.some((e) => e.includes("credentials"));
@@ -134,7 +171,7 @@ export interface StatsCache {
 }
 
 export async function getStats(name: string): Promise<StatsCache | null> {
-  const file = join(getProfileDir(name), "stats-cache.json");
+  const file = join(getClaudeConfigDir(name), "stats-cache.json");
   try {
     const data = await readFile(file, "utf8");
     return JSON.parse(data) as StatsCache;
