@@ -11,6 +11,8 @@ import {
   createProfile,
   removeProfile,
   getProfileDir,
+  getConfig,
+  setConfig,
   isValidName,
 } from "./profiles.js";
 import { selectProfile } from "./selector.js";
@@ -135,6 +137,38 @@ program
     console.log();
   });
 
+// --- config ---
+program
+  .command("config <name>")
+  .description("Configure a profile")
+  .option("--skip-permissions", "Always launch with --dangerously-skip-permissions")
+  .option("--no-skip-permissions", "Require --dangerously-skip-permissions via --")
+  .action(async (name: string, opts: { skipPermissions?: boolean }) => {
+    if (!(await profileExists(name))) {
+      console.log(chalk.red(`  Profile "${name}" does not exist.`));
+      return;
+    }
+
+    if (opts.skipPermissions === undefined) {
+      // No flags provided — show current config
+      const config = await getConfig(name);
+      console.log(chalk.bold(`\n  Config for "${name}"\n`));
+      console.log(
+        `  skip-permissions  ${
+          config.skipPermissions
+            ? chalk.green("on")
+            : chalk.dim("off")
+        }`
+      );
+      console.log();
+      return;
+    }
+
+    await setConfig(name, { skipPermissions: opts.skipPermissions });
+    const label = opts.skipPermissions ? chalk.green("on") : chalk.dim("off");
+    console.log(`  ✓ skip-permissions ${label} for "${name}"`);
+  });
+
 // --- use ---
 program
   .command("use <name>")
@@ -167,9 +201,15 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const config = await getConfig(name);
+  const configArgs: string[] = [];
+  if (config.skipPermissions) {
+    configArgs.push("--dangerously-skip-permissions");
+  }
+
   printBanner(name);
 
-  const child = spawn("claude", args, {
+  const child = spawn("claude", [...configArgs, ...args], {
     env: { ...process.env, CLAUDE_CONFIG_DIR: getProfileDir(name) },
     stdio: "inherit",
   });

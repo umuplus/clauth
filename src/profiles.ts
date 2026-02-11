@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdir, readdir, rm, access } from "node:fs/promises";
+import { mkdir, readdir, rm, access, readFile, writeFile } from "node:fs/promises";
 
 const CLAUTH_DIR = join(homedir(), ".clauth");
 
@@ -54,6 +54,34 @@ export async function hasAuth(name: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// --- config ---
+
+export interface ProfileConfig {
+  skipPermissions?: boolean;
+}
+
+function configPath(name: string): string {
+  return join(getProfileDir(name), "clauth.json");
+}
+
+export async function getConfig(name: string): Promise<ProfileConfig> {
+  try {
+    const data = await readFile(configPath(name), "utf8");
+    return JSON.parse(data) as ProfileConfig;
+  } catch {
+    return {};
+  }
+}
+
+export async function setConfig(
+  name: string,
+  updates: Partial<ProfileConfig>
+): Promise<ProfileConfig> {
+  const config = { ...(await getConfig(name)), ...updates };
+  await writeFile(configPath(name), JSON.stringify(config, null, 2) + "\n");
+  return config;
 }
 
 export interface ProfileInfo {
