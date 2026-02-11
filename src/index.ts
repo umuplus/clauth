@@ -19,6 +19,7 @@ import {
 } from "./profiles.js";
 import { selectProfile } from "./selector.js";
 import { printHeader, formatProfileLine, printLaunchBanner } from "./ui.js";
+import { showAllStats, showProfileStats } from "./stats.js";
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -141,6 +142,18 @@ program
     await setConfig(name, { skipPermissions: opts.skipPermissions });
     const label = opts.skipPermissions ? chalk.green("on") : chalk.dim("off");
     console.log(`  ✓ skip-permissions ${label} for "${name}"`);
+  });
+
+// --- stats ---
+program
+  .command("stats [name]")
+  .description("Show usage statistics")
+  .action(async (name?: string) => {
+    if (name) {
+      await showProfileStats(name);
+    } else {
+      await showAllStats();
+    }
   });
 
 // --- use ---

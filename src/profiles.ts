@@ -103,6 +103,46 @@ export async function setLastUsed(name: string): Promise<void> {
   await writeFile(LAST_FILE, name + "\n");
 }
 
+// --- stats ---
+
+export interface DailyActivity {
+  date: string;
+  messageCount: number;
+  sessionCount: number;
+  toolCallCount: number;
+}
+
+export interface DailyModelTokens {
+  date: string;
+  tokensByModel: Record<string, number>;
+}
+
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+export interface StatsCache {
+  totalSessions: number;
+  totalMessages: number;
+  firstSessionDate?: string;
+  dailyActivity: DailyActivity[];
+  dailyModelTokens: DailyModelTokens[];
+  modelUsage: Record<string, ModelUsage>;
+}
+
+export async function getStats(name: string): Promise<StatsCache | null> {
+  const file = join(getProfileDir(name), "stats-cache.json");
+  try {
+    const data = await readFile(file, "utf8");
+    return JSON.parse(data) as StatsCache;
+  } catch {
+    return null;
+  }
+}
+
 export interface ProfileInfo {
   name: string;
   authenticated: boolean;
