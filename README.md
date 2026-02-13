@@ -50,21 +50,6 @@ clauth remove work
 # Delete profile "work" and all its data? [y/N]
 ```
 
-### `clauth list`
-
-Show all profiles with their authentication status and configuration.
-
-```
-  ╭──────────────────────────────╮
-  │         c l a u t h          │
-  │    Claude Profile Manager    │
-  ╰──────────────────────────────╯
-
-    ● default   authenticated
-    ● work      authenticated · skip-permissions
-    ○ personal  no auth
-```
-
 ### `clauth launch [name]`
 
 Launch Claude CLI with the given profile. If no name is provided, it uses the profile last used in the current directory (or the globally last-used profile).

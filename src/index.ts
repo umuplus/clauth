@@ -23,7 +23,7 @@ import {
   isReservedName,
 } from "./profiles.js";
 import { selectProfile } from "./selector.js";
-import { printHeader, formatProfileLine, printLaunchBanner } from "./ui.js";
+import { printLaunchBanner } from "./ui.js";
 import { showAllStats, showProfileStats } from "./stats.js";
 import { runSetup } from "./setup.js";
 
@@ -106,29 +106,6 @@ program
     });
   });
 
-// --- list ---
-program
-  .command("list")
-  .description("Show all profiles")
-  .action(async () => {
-    const profiles = await getProfilesWithStatus();
-
-    if (profiles.length === 0) {
-      console.log(
-        chalk.dim("\n  No profiles yet. Create one with: clauth add <name>\n")
-      );
-      return;
-    }
-
-    printHeader();
-
-    const maxNameLen = Math.max(...profiles.map((p) => p.name.length));
-    for (const p of profiles) {
-      console.log(formatProfileLine(p, { maxNameLen }));
-    }
-    console.log();
-  });
-
 // --- config ---
 program
   .command("config <name>")
@@ -204,7 +181,7 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   if (!(await profileExists(name))) {
     console.log(chalk.red(`\n  Profile "${name}" does not exist.`));
     console.log(
-      chalk.dim('  Run "clauth list" to see available profiles.\n')
+      chalk.dim('  Run "clauth" to see available profiles.\n')
     );
     process.exit(1);
   }
