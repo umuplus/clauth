@@ -87,8 +87,9 @@ export async function ensureDefaultProfile(): Promise<void> {
 export async function hasAuth(name: string): Promise<boolean> {
   const dir = getClaudeConfigDir(name);
   try {
-    const entries = await readdir(dir);
-    return entries.some((e) => e.includes("credentials"));
+    const data = await readFile(join(dir, ".claude.json"), "utf8");
+    const config = JSON.parse(data);
+    return !!(config.oauthAccount || config.userID);
   } catch {
     return false;
   }
