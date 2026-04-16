@@ -35,11 +35,13 @@ export async function ensureClauthDir(): Promise<void> {
   await mkdir(CLAUTH_DIR, { recursive: true });
 }
 
+const NON_PROFILE_DIRS = ["hive"];
+
 export async function getProfileNames(): Promise<string[]> {
   await ensureClauthDir();
   const entries = await readdir(CLAUTH_DIR, { withFileTypes: true });
   return entries
-    .filter((e) => e.isDirectory())
+    .filter((e) => e.isDirectory() && !NON_PROFILE_DIRS.includes(e.name))
     .map((e) => e.name)
     .sort();
 }

@@ -88,6 +88,11 @@ program
   .command("remove <name>")
   .description("Delete a profile and its config dir")
   .action(async (name: string) => {
+    if (name.toLowerCase() === "hive") {
+      console.log(chalk.red(`  "hive" is not a profile. It's the Hive Mind knowledge wiki.`));
+      return;
+    }
+
     if (!(await profileExists(name))) {
       console.log(chalk.red(`  Profile "${name}" does not exist.`));
       return;
@@ -123,6 +128,11 @@ program
   .option("--hive-mind", "Enable hive mind for this profile")
   .option("--no-hive-mind", "Disable hive mind for this profile")
   .action(async (name: string, opts: { skipPermissions?: boolean; hiveMind?: boolean }) => {
+    if (name.toLowerCase() === "hive") {
+      console.log(chalk.red(`  "hive" is not a profile. It's the Hive Mind knowledge wiki.`));
+      return;
+    }
+
     if (!(await profileExists(name))) {
       console.log(chalk.red(`  Profile "${name}" does not exist.`));
       return;
@@ -236,6 +246,11 @@ program
 // --- helpers ---
 
 async function launchClaude(name: string, args: string[]): Promise<void> {
+  if (name.toLowerCase() === "hive") {
+    console.log(chalk.red(`  "hive" is not a profile. It's the Hive Mind knowledge wiki.`));
+    process.exit(1);
+  }
+
   if (!(await profileExists(name))) {
     console.log(chalk.red(`\n  Profile "${name}" does not exist.`));
     console.log(

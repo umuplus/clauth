@@ -81,6 +81,11 @@ export async function showAllStats(): Promise<void> {
 }
 
 export async function showProfileStats(name: string): Promise<void> {
+  if (name.toLowerCase() === "hive") {
+    console.log(chalk.red(`\n  "hive" is not a profile. It's the Hive Mind knowledge wiki.\n`));
+    return;
+  }
+
   if (!(await profileExists(name))) {
     console.log(chalk.red(`\n  Profile "${name}" does not exist.\n`));
     return;

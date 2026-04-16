@@ -41,11 +41,11 @@ export async function runSetup(): Promise<void> {
       }
 
       if (isReservedName(name)) {
-        console.log(
-          chalk.red(
-            `  "${name}" is reserved. It's auto-created as a link to your existing Claude config.\n`
-          )
-        );
+        const reason =
+          name.toLowerCase() === "hive"
+            ? "It's reserved for the Hive Mind knowledge wiki."
+            : "It's auto-created as a link to your existing Claude config.";
+        console.log(chalk.red(`  "${name}" is reserved. ${reason}\n`));
         continue;
       }
 
