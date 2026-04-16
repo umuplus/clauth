@@ -1,5 +1,5 @@
-import { join } from "node:path";
-import { mkdir, access, writeFile } from "node:fs/promises";
+import { join, basename } from "node:path";
+import { mkdir, access, writeFile, readdir, stat } from "node:fs/promises";
 import { getClauthDir } from "./profiles.js";
 
 const HIVE_DIR = join(getClauthDir(), "hive");
@@ -117,6 +117,10 @@ When processing a session JSONL log:
    - When new information contradicts existing content, update the page and note what changed and when.
 6. **Update index.md** — add entries for any new pages. Update summaries for modified pages.
 7. **Append to log.md** — record what you did.
+8. **Print a summary** — as your final output, print a single line in this exact format:
+   \`HIVE_SUMMARY: <short description of what was extracted and updated>\`
+   Example: \`HIVE_SUMMARY: extracted 2 decisions, 1 architecture update; created projects/clauth/problems.md; updated index\`
+   This line is parsed by clauth to display a brief status to the user. Keep it under 120 characters.
 
 ### Ingest from manual input
 
@@ -127,6 +131,7 @@ When processing a direct user prompt (via \`clauth hive\`):
 3. If it's new knowledge: upsert into the appropriate page(s), update index, append to log.
 4. If it's a correction: find the relevant page(s), update them, note the correction in the log.
 5. If it's a question: treat it as a query (see below).
+6. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you did>\`
 
 ### Query
 
@@ -136,6 +141,7 @@ When answering a question against the wiki:
 2. Read those pages and synthesize an answer.
 3. Cite your sources with page links.
 4. If the answer is substantial and reusable, offer to file it as a new wiki page.
+5. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you answered or filed>\`
 
 ## Index maintenance — index.md
 
@@ -212,3 +218,72 @@ const LOG_CONTENT = `# Hive Mind — Log
 
 (Initialized — no entries yet)
 `;
+
+// --- session log detection ---
+
+export async function snapshotSessionFiles(
+  configDir: string
+): Promise<Map<string, number>> {
+  const snapshot = new Map<string, number>();
+  const projectsDir = join(configDir, "projects");
+
+  let projectDirs: string[];
+  try {
+    const entries = await readdir(projectsDir, { withFileTypes: true });
+    projectDirs = entries
+      .filter((e) => e.isDirectory())
+      .map((e) => join(projectsDir, e.name));
+  } catch {
+    return snapshot;
+  }
+
+  for (const dir of projectDirs) {
+    let files: string[];
+    try {
+      files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+
+    for (const file of files) {
+      const filePath = join(dir, file);
+      try {
+        const st = await stat(filePath);
+        snapshot.set(filePath, st.mtimeMs);
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return snapshot;
+}
+
+export async function detectNewSessionLog(
+  configDir: string,
+  before: Map<string, number>
+): Promise<string | null> {
+  const after = await snapshotSessionFiles(configDir);
+
+  let bestPath: string | null = null;
+  let bestMtime = 0;
+
+  for (const [filePath, mtimeMs] of after) {
+    const prevMtime = before.get(filePath);
+    // New file or modified file
+    if (prevMtime === undefined || mtimeMs > prevMtime) {
+      if (mtimeMs > bestMtime) {
+        bestMtime = mtimeMs;
+        bestPath = filePath;
+      }
+    }
+  }
+
+  return bestPath;
+}
+
+// --- project name ---
+
+export function getProjectName(): string {
+  return basename(process.cwd());
+}

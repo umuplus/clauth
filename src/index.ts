@@ -26,7 +26,7 @@ import { selectProfile } from "./selector.js";
 import { printLaunchBanner } from "./ui.js";
 import { showAllStats, showProfileStats } from "./stats.js";
 import { runSetup } from "./setup.js";
-import { ensureHiveDir } from "./hive.js";
+import { ensureHiveDir, snapshotSessionFiles, detectNewSessionLog } from "./hive.js";
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -213,6 +213,9 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
     configArgs.push("--dangerously-skip-permissions");
     flags.push("skip-permissions");
   }
+  if (config.hiveMind?.enabled) {
+    flags.push("hive-mind");
+  }
 
   await setLastUsed(name);
   await setFolderProfile(name);
@@ -224,6 +227,12 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   if (name !== "default") {
     env.CLAUDE_CONFIG_DIR = claudeDir;
   }
+
+  // Snapshot session files before launch (for hive mind detection)
+  const hiveEnabled = config.hiveMind?.enabled ?? false;
+  const sessionSnapshot = hiveEnabled
+    ? await snapshotSessionFiles(claudeDir)
+    : null;
 
   const child = spawn("claude", [...configArgs, ...args], {
     env,
@@ -239,7 +248,14 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
     process.exit(1);
   });
 
-  child.on("close", (code) => {
+  child.on("close", async (code) => {
+    if (sessionSnapshot) {
+      const logPath = await detectNewSessionLog(claudeDir, sessionSnapshot);
+      if (logPath) {
+        console.log(chalk.dim(`\n  hive: session log detected (${logPath})`));
+        // Phase 4: analysis will be triggered here
+      }
+    }
     process.exit(code ?? 0);
   });
 }
