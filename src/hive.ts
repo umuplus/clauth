@@ -289,34 +289,26 @@ export function getProjectName(): string {
   return basename(process.cwd());
 }
 
-// --- post-session analysis ---
+// --- hive operations ---
 
 export interface HiveAnalysisResult {
   summary: string | null;
   error: string | null;
 }
 
-export function runHiveAnalysis(
-  logPath: string,
-  projectName: string,
+function spawnHiveSession(
+  prompt: string,
+  extraAddDirs: string[],
   claudeConfigDir: string,
   profileName: string
 ): Promise<HiveAnalysisResult> {
   return new Promise((resolve) => {
-    const prompt = [
-      `Analyze the Claude Code session log at ${logPath} for project "${projectName}".`,
-      `Extract knowledge and upsert into the wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
-      `Read the session log from disk. Focus on decisions, problems, tradeoffs, architecture, and context.`,
-      `Skip trivial operations and raw tool outputs.`,
-      `When done, print a HIVE_SUMMARY line as described in the schema.`,
-    ].join(" ");
-
     const args = [
       "-p",
       "--dangerously-skip-permissions",
       "--no-session-persistence",
       "--add-dir", HIVE_DIR,
-      "--add-dir", dirname(logPath),
+      ...extraAddDirs.flatMap((dir) => ["--add-dir", dir]),
       prompt,
     ];
 
@@ -351,7 +343,6 @@ export function runHiveAnalysis(
         return;
       }
 
-      // Parse stdout for HIVE_SUMMARY line
       const summaryLine = stdout
         .split("\n")
         .find((line) => line.startsWith("HIVE_SUMMARY:"));
@@ -363,4 +354,36 @@ export function runHiveAnalysis(
       resolve({ summary, error: null });
     });
   });
+}
+
+export function runHiveAnalysis(
+  logPath: string,
+  projectName: string,
+  claudeConfigDir: string,
+  profileName: string
+): Promise<HiveAnalysisResult> {
+  const prompt = [
+    `Analyze the Claude Code session log at ${logPath} for project "${projectName}".`,
+    `Extract knowledge and upsert into the wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+    `Read the session log from disk. Focus on decisions, problems, tradeoffs, architecture, and context.`,
+    `Skip trivial operations and raw tool outputs.`,
+    `When done, print a HIVE_SUMMARY line as described in the schema.`,
+  ].join(" ");
+
+  return spawnHiveSession(prompt, [dirname(logPath)], claudeConfigDir, profileName);
+}
+
+export function runHiveManual(
+  userPrompt: string,
+  claudeConfigDir: string,
+  profileName: string
+): Promise<HiveAnalysisResult> {
+  const prompt = [
+    `You are maintaining the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+    `Process the following input and upsert accordingly:`,
+    userPrompt,
+    `When done, print a HIVE_SUMMARY line as described in the schema.`,
+  ].join(" ");
+
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
 }

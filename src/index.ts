@@ -31,6 +31,7 @@ import {
   snapshotSessionFiles,
   detectNewSessionLog,
   runHiveAnalysis,
+  runHiveManual,
   getProjectName,
 } from "./hive.js";
 
@@ -182,6 +183,37 @@ program
   .description("Guided profile setup wizard")
   .action(async () => {
     await runSetup();
+  });
+
+// --- hive ---
+program
+  .command("hive <prompt>")
+  .description("Feed knowledge into the hive mind wiki or query it")
+  .action(async (prompt: string) => {
+    try {
+      const folder = await getFolderProfile();
+      const profileName = folder ?? (await getLastUsed());
+      if (!profileName) {
+        console.log(chalk.dim("\n  No profile found. Run: clauth launch <name> first.\n"));
+        process.exit(1);
+      }
+
+      const claudeDir = getClaudeConfigDir(profileName);
+      console.log(chalk.dim("  hive: processing..."));
+
+      const result = await runHiveManual(prompt, claudeDir, profileName);
+      if (result.summary) {
+        console.log(chalk.dim(`  hive: ${result.summary}`));
+      } else if (result.error) {
+        console.log(chalk.red("  hive: failed"));
+        console.log(chalk.red(result.error));
+      } else {
+        console.log(chalk.dim("  hive: done (no summary returned)"));
+      }
+    } catch (err) {
+      console.log(chalk.red(`  hive: unexpected error — ${err}`));
+      process.exit(1);
+    }
   });
 
 // --- launch ---
