@@ -1,5 +1,6 @@
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import { mkdir, access, writeFile, readdir, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
 
 const HIVE_DIR = join(getClauthDir(), "hive");
@@ -286,4 +287,80 @@ export async function detectNewSessionLog(
 
 export function getProjectName(): string {
   return basename(process.cwd());
+}
+
+// --- post-session analysis ---
+
+export interface HiveAnalysisResult {
+  summary: string | null;
+  error: string | null;
+}
+
+export function runHiveAnalysis(
+  logPath: string,
+  projectName: string,
+  claudeConfigDir: string,
+  profileName: string
+): Promise<HiveAnalysisResult> {
+  return new Promise((resolve) => {
+    const prompt = [
+      `Analyze the Claude Code session log at ${logPath} for project "${projectName}".`,
+      `Extract knowledge and upsert into the wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+      `Read the session log from disk. Focus on decisions, problems, tradeoffs, architecture, and context.`,
+      `Skip trivial operations and raw tool outputs.`,
+      `When done, print a HIVE_SUMMARY line as described in the schema.`,
+    ].join(" ");
+
+    const args = [
+      "-p",
+      "--dangerously-skip-permissions",
+      "--no-session-persistence",
+      "--add-dir", HIVE_DIR,
+      "--add-dir", dirname(logPath),
+      prompt,
+    ];
+
+    const env = { ...process.env };
+    if (profileName !== "default") {
+      env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+    }
+
+    const child = spawn("claude", args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    child.on("error", (err) => {
+      resolve({ summary: null, error: err.message });
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0 && stderr) {
+        resolve({ summary: null, error: stderr.trim() });
+        return;
+      }
+
+      // Parse stdout for HIVE_SUMMARY line
+      const summaryLine = stdout
+        .split("\n")
+        .find((line) => line.startsWith("HIVE_SUMMARY:"));
+
+      const summary = summaryLine
+        ? summaryLine.replace("HIVE_SUMMARY:", "").trim()
+        : null;
+
+      resolve({ summary, error: null });
+    });
+  });
 }

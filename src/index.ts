@@ -26,7 +26,13 @@ import { selectProfile } from "./selector.js";
 import { printLaunchBanner } from "./ui.js";
 import { showAllStats, showProfileStats } from "./stats.js";
 import { runSetup } from "./setup.js";
-import { ensureHiveDir, snapshotSessionFiles, detectNewSessionLog } from "./hive.js";
+import {
+  ensureHiveDir,
+  snapshotSessionFiles,
+  detectNewSessionLog,
+  runHiveAnalysis,
+  getProjectName,
+} from "./hive.js";
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -250,10 +256,22 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
 
   child.on("close", async (code) => {
     if (sessionSnapshot) {
-      const logPath = await detectNewSessionLog(claudeDir, sessionSnapshot);
-      if (logPath) {
-        console.log(chalk.dim(`\n  hive: session log detected (${logPath})`));
-        // Phase 4: analysis will be triggered here
+      try {
+        const logPath = await detectNewSessionLog(claudeDir, sessionSnapshot);
+        if (logPath) {
+          console.log(chalk.dim("\n  hive: analyzing session..."));
+          const result = await runHiveAnalysis(logPath, getProjectName(), claudeDir, name);
+          if (result.summary) {
+            console.log(chalk.dim(`  hive: ${result.summary}`));
+          } else if (result.error) {
+            console.log(chalk.red("  hive: analysis failed"));
+            console.log(chalk.red(result.error));
+          } else {
+            console.log(chalk.dim("  hive: analysis complete (no summary returned)"));
+          }
+        }
+      } catch (err) {
+        console.log(chalk.red(`  hive: unexpected error — ${err}`));
       }
     }
     process.exit(code ?? 0);
