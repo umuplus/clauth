@@ -21,7 +21,7 @@ export function getClaudeConfigDir(name: string): string {
   return join(CLAUTH_DIR, name);
 }
 
-export const RESERVED_NAMES = ["default"];
+export const RESERVED_NAMES = ["default", "hive"];
 
 export function isValidName(name: string): boolean {
   return /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name);
@@ -99,6 +99,9 @@ export async function hasAuth(name: string): Promise<boolean> {
 
 export interface ProfileConfig {
   skipPermissions?: boolean;
+  hiveMind?: {
+    enabled: boolean;
+  };
 }
 
 function configPath(name: string): string {

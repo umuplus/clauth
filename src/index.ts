@@ -26,6 +26,7 @@ import { selectProfile } from "./selector.js";
 import { printLaunchBanner } from "./ui.js";
 import { showAllStats, showProfileStats } from "./stats.js";
 import { runSetup } from "./setup.js";
+import { ensureHiveDir } from "./hive.js";
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -56,11 +57,11 @@ program
     }
 
     if (isReservedName(name)) {
-      console.log(
-        chalk.red(
-          `  "${name}" is a reserved profile name. It's auto-created as a link to your existing Claude config.`
-        )
-      );
+      const reason =
+        name.toLowerCase() === "hive"
+          ? "It's reserved for the Hive Mind knowledge wiki."
+          : "It's auto-created as a link to your existing Claude config.";
+      console.log(chalk.red(`  "${name}" is a reserved profile name. ${reason}`));
       process.exit(1);
     }
 
@@ -112,13 +113,17 @@ program
   .description("Configure a profile")
   .option("--skip-permissions", "Always launch with --dangerously-skip-permissions")
   .option("--no-skip-permissions", "Require --dangerously-skip-permissions via --")
-  .action(async (name: string, opts: { skipPermissions?: boolean }) => {
+  .option("--hive-mind", "Enable hive mind for this profile")
+  .option("--no-hive-mind", "Disable hive mind for this profile")
+  .action(async (name: string, opts: { skipPermissions?: boolean; hiveMind?: boolean }) => {
     if (!(await profileExists(name))) {
       console.log(chalk.red(`  Profile "${name}" does not exist.`));
       return;
     }
 
-    if (opts.skipPermissions === undefined) {
+    const noFlags = opts.skipPermissions === undefined && opts.hiveMind === undefined;
+
+    if (noFlags) {
       // No flags provided — show current config
       const config = await getConfig(name);
       console.log(chalk.bold(`\n  Config for "${name}"\n`));
@@ -129,13 +134,28 @@ program
             : chalk.dim("off")
         }`
       );
+      console.log(
+        `  hive-mind         ${
+          config.hiveMind?.enabled
+            ? chalk.green("on")
+            : chalk.dim("off")
+        }`
+      );
       console.log();
       return;
     }
 
-    await setConfig(name, { skipPermissions: opts.skipPermissions });
-    const label = opts.skipPermissions ? chalk.green("on") : chalk.dim("off");
-    console.log(`  ✓ skip-permissions ${label} for "${name}"`);
+    if (opts.skipPermissions !== undefined) {
+      await setConfig(name, { skipPermissions: opts.skipPermissions });
+      const label = opts.skipPermissions ? chalk.green("on") : chalk.dim("off");
+      console.log(`  ✓ skip-permissions ${label} for "${name}"`);
+    }
+
+    if (opts.hiveMind !== undefined) {
+      await setConfig(name, { hiveMind: { enabled: opts.hiveMind } });
+      const label = opts.hiveMind ? chalk.green("on") : chalk.dim("off");
+      console.log(`  ✓ hive-mind ${label} for "${name}"`);
+    }
   });
 
 // --- stats ---
@@ -249,8 +269,11 @@ if (argv.length <= 2) {
   // No subcommand → always show interactive selector
   (async () => {
     await ensureDefaultProfile();
+    await ensureHiveDir();
     await interactiveSelect();
   })();
 } else {
-  ensureDefaultProfile().then(() => program.parse(argv));
+  ensureDefaultProfile()
+    .then(() => ensureHiveDir())
+    .then(() => program.parse(argv));
 }
