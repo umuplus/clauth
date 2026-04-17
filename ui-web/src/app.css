@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(64 64 64);
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(82 82 82);
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-accent-foreground hover:bg-orange-500;
+  }
+  .btn-secondary {
+    @apply btn bg-neutral-800 text-neutral-100 hover:bg-neutral-700 border border-neutral-700;
+  }
+  .btn-ghost {
+    @apply btn text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800;
+  }
+  .input {
+    @apply w-full px-3 py-2 bg-neutral-900 border border-neutral-800 rounded-md text-sm focus:outline-none focus:border-accent transition-colors;
+  }
+  .card {
+    @apply bg-neutral-900 border border-neutral-800 rounded-lg p-4;
+  }
+  .nav-link {
+    @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800/60 transition-colors;
+  }
+  .nav-link.active {
+    @apply bg-neutral-800 text-neutral-100;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+  }
+}

@@ -304,6 +304,25 @@ program
     }
   });
 
+// --- ui ---
+program
+  .command("ui")
+  .description("Launch the clauth web UI in your browser")
+  .option("-p, --port <port>", "Specific port (default: random free port)")
+  .option("--no-open", "Don't auto-open browser")
+  .action(async (opts: { port?: string; open?: boolean }) => {
+    try {
+      const { startUiServer } = await import("./ui-server/server.js");
+      const port = opts.port ? parseInt(opts.port, 10) : undefined;
+      const { url } = await startUiServer({ port, openBrowser: opts.open !== false });
+      console.log(chalk.green(`\n  ✓ clauth UI running at ${chalk.cyan(url)}`));
+      console.log(chalk.dim("  Press Ctrl+C to stop.\n"));
+    } catch (err) {
+      console.log(chalk.red(`  Failed to start UI: ${err}`));
+      process.exit(1);
+    }
+  });
+
 // --- launch ---
 program
   .command("launch [name]")

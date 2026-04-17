@@ -10,8 +10,11 @@
     "clauth": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:cli && npm run build:ui",
+    "build:cli": "tsc",
+    "build:ui": "cd ui-web && npm install --no-audit --no-fund --silent && npm run build",
     "dev": "tsc --watch",
+    "dev:ui": "cd ui-web && npm run dev",
     "start": "node dist/index.js",
     "link": "npm run build && npm link"
   },
@@ -41,10 +44,12 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.14",
     "asciichart": "^1.5.25",
     "chalk": "^5.6.2",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.3",
-    "gradient-string": "^3.0.0"
+    "gradient-string": "^3.0.0",
+    "hono": "^4.12.14"
   }
 }
