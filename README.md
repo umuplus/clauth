@@ -1,6 +1,6 @@
 # clauth
 
-Manage multiple Claude CLI account profiles. Switch between accounts, track per-profile usage stats, launch Claude with per-directory profile memory, and build a persistent knowledge wiki that compounds across sessions (Hive Mind).
+Manage multiple Claude CLI account profiles. Switch between accounts, track per-profile usage stats, launch Claude with per-directory profile memory, and build a persistent knowledge wiki that compounds across sessions (Hive Mind). Use the CLI or the built-in web UI.
 
 ## Install
 
@@ -110,6 +110,27 @@ Interactive wizard that walks you through creating profiles and configuring them
 ```bash
 clauth setup
 ```
+
+### `clauth ui`
+
+Launch the clauth web UI in your browser. A local, graphical interface for browsing the Hive Mind wiki, feeding knowledge, querying, managing profiles, and viewing stats.
+
+```bash
+clauth ui                  # random free port, opens browser
+clauth ui --port 3030      # specific port
+clauth ui --no-open        # don't auto-open browser (useful for SSH tunneling)
+```
+
+The server binds only to `127.0.0.1` (localhost) — never exposed to the network.
+
+Features available in the UI:
+- **Dashboard** — overview of wiki pages, profile status, recent activity
+- **Hive browser** — navigate wiki pages by category with rendered markdown
+- **Feed** — textarea or drag-drop file upload for ingest
+- **Query** — chat-like interface for read-only questions
+- **Graph** — visual knowledge graph (Cytoscape.js) showing links between pages
+- **Profiles** — toggle skip-permissions and hive-mind per profile
+- **Stats** — real charts for token usage and activity
 
 ### `clauth hive [prompt]`
 
