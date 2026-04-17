@@ -3,6 +3,9 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { spawn } from "node:child_process";
+import { access, readFile } from "node:fs/promises";
+import { resolve, join } from "node:path";
+import { platform } from "node:os";
 import { createInterface } from "node:readline";
 import {
   ensureClauthDir,
@@ -32,7 +35,12 @@ import {
   detectNewSessionLog,
   runHiveAnalysis,
   runHiveManual,
+  runHiveQuery,
+  runHiveLint,
+  runHiveFileIngest,
   getProjectName,
+  getHiveDir,
+  buildProjectContext,
 } from "./hive.js";
 
 // Extract passthrough args (everything after --) before Commander parses
@@ -47,7 +55,7 @@ const program = new Command();
 program
   .name("clauth")
   .description("Manage multiple Claude CLI account profiles")
-  .version("1.0.0");
+  .version("1.1.0");
 
 // --- add ---
 program
@@ -197,10 +205,54 @@ program
 
 // --- hive ---
 program
-  .command("hive <prompt>")
-  .description("Feed knowledge into the hive mind wiki or query it")
-  .action(async (prompt: string) => {
+  .command("hive [prompt]")
+  .description("Feed knowledge, query, or lint the hive mind wiki")
+  .option("--query", "Query the wiki (read-only, no modifications)")
+  .option("--lint", "Health-check the wiki for issues")
+  .option("--file <path>", "Ingest a file into the wiki")
+  .option("--index", "Print the wiki index")
+  .option("--log [n]", "Print the last n log entries (default: 10)")
+  .option("--open", "Open the wiki directory in the system file manager")
+  .action(async (prompt: string | undefined, opts: {
+    query?: boolean; lint?: boolean; file?: string;
+    index?: boolean; log?: string | boolean; open?: boolean;
+  }) => {
     try {
+      // --- Phase 10: local browse commands (no LLM needed) ---
+      if (opts.index) {
+        try {
+          const content = await readFile(join(getHiveDir(), "index.md"), "utf8");
+          console.log(content);
+        } catch {
+          console.log(chalk.dim("  No index.md found. Run a session with hive mind enabled first."));
+        }
+        return;
+      }
+
+      if (opts.log !== undefined) {
+        const n = typeof opts.log === "string" ? (parseInt(opts.log, 10) || 10) : 10;
+        try {
+          const content = await readFile(join(getHiveDir(), "log.md"), "utf8");
+          const entries = content.split("\n").filter((l) => l.startsWith("## ["));
+          if (entries.length === 0) {
+            console.log(chalk.dim("  No log entries yet."));
+          } else {
+            entries.slice(-n).forEach((e) => console.log(e));
+          }
+        } catch {
+          console.log(chalk.dim("  No log.md found. Run a session with hive mind enabled first."));
+        }
+        return;
+      }
+
+      if (opts.open) {
+        const cmd = platform() === "darwin" ? "open" : platform() === "win32" ? "explorer" : "xdg-open";
+        spawn(cmd, [getHiveDir()], { detached: true, stdio: "ignore" }).unref();
+        console.log(chalk.dim(`  Opened ${getHiveDir()}`));
+        return;
+      }
+
+      // --- LLM-powered operations (need a profile for auth) ---
       const folder = await getFolderProfile();
       const profileName = folder ?? (await getLastUsed());
       if (!profileName) {
@@ -209,9 +261,32 @@ program
       }
 
       const claudeDir = getClaudeConfigDir(profileName);
-      console.log(chalk.dim("  hive: processing..."));
 
-      const result = await runHiveManual(prompt, claudeDir, profileName);
+      let result;
+      if (opts.lint) {
+        console.log(chalk.dim("  hive: running lint..."));
+        result = await runHiveLint(claudeDir, profileName);
+      } else if (opts.file) {
+        const filePath = resolve(opts.file);
+        try {
+          await access(filePath);
+        } catch {
+          console.log(chalk.red(`  File not found: ${filePath}`));
+          process.exit(1);
+        }
+        console.log(chalk.dim(`  hive: ingesting ${opts.file}...`));
+        result = await runHiveFileIngest(filePath, prompt, claudeDir, profileName);
+      } else if (!prompt) {
+        console.log(chalk.red("  A prompt is required. Usage: clauth hive \"<prompt>\", clauth hive --lint, or clauth hive --file <path>"));
+        process.exit(1);
+      } else if (opts.query) {
+        console.log(chalk.dim("  hive: querying..."));
+        result = await runHiveQuery(prompt, claudeDir, profileName);
+      } else {
+        console.log(chalk.dim("  hive: processing..."));
+        result = await runHiveManual(prompt, claudeDir, profileName);
+      }
+
       if (result.summary) {
         console.log(chalk.dim(`  hive: ${result.summary}`));
       } else if (result.error) {
@@ -286,6 +361,14 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   const sessionSnapshot = hiveEnabled
     ? await snapshotSessionFiles(claudeDir)
     : null;
+
+  // Inject prior project knowledge from hive wiki
+  if (hiveEnabled) {
+    const context = await buildProjectContext(getProjectName());
+    if (context) {
+      configArgs.push("--append-system-prompt", context);
+    }
+  }
 
   const child = spawn("claude", [...configArgs, ...args], {
     env,

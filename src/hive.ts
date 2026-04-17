@@ -1,5 +1,5 @@
 import { join, basename, dirname } from "node:path";
-import { mkdir, access, writeFile, readdir, stat } from "node:fs/promises";
+import { mkdir, access, writeFile, readFile, readdir, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
 
@@ -26,8 +26,9 @@ async function writeIfMissing(path: string, content: string): Promise<void> {
 
 export async function ensureHiveDir(): Promise<void> {
   await mkdir(HIVE_DIR, { recursive: true });
-  await mkdir(join(HIVE_DIR, "projects"), { recursive: true });
-  await mkdir(join(HIVE_DIR, "concepts"), { recursive: true });
+  for (const dir of ["projects", "concepts", "clients", "company", "personal", "people"]) {
+    await mkdir(join(HIVE_DIR, dir), { recursive: true });
+  }
 
   await writeIfMissing(join(HIVE_DIR, "CLAUDE.md"), SCHEMA_CONTENT);
   await writeIfMissing(join(HIVE_DIR, "index.md"), INDEX_CONTENT);
@@ -36,11 +37,13 @@ export async function ensureHiveDir(): Promise<void> {
 
 const SCHEMA_CONTENT = `# Hive Mind Wiki — Schema
 
-You are maintaining a personal knowledge wiki built from Claude Code sessions. This file governs how you read, write, and maintain every page in this wiki. Follow these conventions exactly.
+You are maintaining a personal knowledge wiki. This file governs how you read, write, and maintain every page in this wiki. Follow these conventions exactly.
 
 ## Purpose
 
-This wiki captures the accumulated knowledge from development sessions across all projects — decisions made, problems solved, tradeoffs considered, architecture chosen, context discovered. It is a persistent, compounding artifact. Knowledge is compiled once and kept current, not re-derived from scratch.
+This wiki captures accumulated knowledge across all domains of the owner's life — development projects, business decisions, client relationships, company strategy, and personal interests. It is a persistent, compounding artifact. Knowledge is compiled once and kept current, not re-derived from scratch.
+
+Sources include Claude Code session logs (auto-analyzed after sessions), manual input (direct prompts), and file ingests. The wiki synthesizes all of these into a coherent, cross-referenced knowledge base.
 
 ## Directory structure
 
@@ -49,20 +52,46 @@ This wiki captures the accumulated knowledge from development sessions across al
   CLAUDE.md         # This file — schema and conventions (do not delete)
   index.md          # Content catalog — every page with a one-line summary
   log.md            # Chronological record of all ingests and queries
-  projects/         # Per-project knowledge
+  projects/         # Per-project technical knowledge
     <project-name>/
       decisions.md      # Key decisions and their rationale
       architecture.md   # System design, patterns, structure
       problems.md       # Bugs, failures, and how they were resolved
       context.md        # Constraints, requirements, goals, stakeholders
       ...               # Additional pages as needed
-  concepts/         # Cross-project knowledge
+  concepts/         # Cross-project technical concepts
     <concept-name>.md   # Patterns, tools, techniques that span projects
+  clients/          # Customer/client profiles
+    <client-name>.md    # Ownership, projects, requirements, communication
+  company/          # Internal organization knowledge
+    <topic>.md          # Team, processes, strategy, roadmap, culture
+  personal/         # Personal knowledge
+    <topic>.md          # Health, interests, goals, habits, reflections
+  people/           # Contact and collaborator profiles
+    <person-name>.md    # Role, expertise, context, relationship
 \`\`\`
 
-**Project scoping**: Every project gets its own subdirectory under \`projects/\`. The directory name is derived from the working directory (e.g., \`/Users/umut/Projects/clauth\` → \`clauth\`). This prevents cross-project entity confusion — "the auth module" in project A is separate from project B.
+### Category conventions
 
-**Concept pages** are for knowledge that spans multiple projects — a library, a pattern, a technique, a tool. Link concept pages from project pages when they're relevant.
+**projects/**: Every project gets its own subdirectory. The directory name is derived from the working directory (e.g., \`/Users/umut/Projects/clauth\` → \`clauth\`). This prevents cross-project entity confusion.
+
+**concepts/**: Knowledge that spans multiple projects — a library, a pattern, a technique, a tool. Link from project pages when relevant.
+
+**clients/**: One page per client/customer. Include which projects they own, key requirements, communication style, important context. Link to project pages.
+
+**company/**: Internal organizational knowledge — team structure, processes, strategy, roadmap, values. Things that shape how work gets done but aren't tied to a single project.
+
+**personal/**: The owner's personal knowledge — health tracking, interests, goals, learning notes, habits. Private and subjective.
+
+**people/**: Profiles of collaborators, contacts, stakeholders. Their role, expertise, and how they relate to projects/clients. Not a contacts database — only people relevant to the knowledge base.
+
+### Relationship linking
+
+When entities relate across categories, link in both directions:
+- Client page mentions projects → link to \`../projects/<name>/\`
+- Project context page mentions client → link to \`../clients/<name>.md\`
+- Person page mentions their projects → link to \`../projects/<name>/\`
+- Concept page mentions projects using it → link to \`../projects/<name>/\`
 
 ## Page format
 
@@ -71,7 +100,8 @@ Every wiki page (except index.md and log.md) uses this structure:
 \`\`\`markdown
 ---
 title: Page Title
-project: project-name    # omit for concept pages
+category: project | concept | client | company | personal | people
+project: project-name    # only for project category pages
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 tags: [tag1, tag2]
@@ -87,11 +117,12 @@ Content organized under clear headings. Use concise prose.
 \`\`\`
 
 Rules:
-- Always include YAML frontmatter with at least \`title\`, \`created\`, \`updated\`
+- Always include YAML frontmatter with at least \`title\`, \`category\`, \`created\`, \`updated\`
 - Update the \`updated\` date whenever you modify a page
 - Use relative links between wiki pages (e.g., \`../concepts/graphql.md\`)
 - Keep pages focused — one topic per page. Split when a page grows beyond ~200 lines
 - Use headings (##, ###) to structure content. Keep nesting shallow
+- Add bidirectional links when entities relate across categories
 
 ## Operations
 
@@ -134,15 +165,45 @@ When processing a direct user prompt (via \`clauth hive\`):
 5. If it's a question: treat it as a query (see below).
 6. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you did>\`
 
+### Ingest from file
+
+When processing a file (invoked with \`clauth hive --file <path>\`):
+
+1. Read the file from disk. Supported formats: markdown, plain text, PDF.
+2. If an additional prompt was provided, use it as focus/context for what to extract.
+3. Read index.md to understand current wiki state.
+4. Extract knowledge from the file — treat it like any other source. Focus on decisions, context, entities, and facts.
+5. Upsert into the appropriate page(s), update index, append to log.
+6. In the log entry, note the source file path.
+7. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you extracted and updated>\`
+
 ### Query
 
-When answering a question against the wiki:
+When answering a question against the wiki (invoked with \`clauth hive --query\`):
 
 1. Read index.md to find relevant pages.
 2. Read those pages and synthesize an answer.
 3. Cite your sources with page links.
-4. If the answer is substantial and reusable, offer to file it as a new wiki page.
-5. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you answered or filed>\`
+4. Do NOT modify any wiki pages — queries are read-only.
+5. If the answer is substantial and reusable, suggest filing it as a new page (but don't do it unless explicitly asked).
+6. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you answered>\`
+
+### Lint
+
+When health-checking the wiki (invoked with \`clauth hive --lint\`):
+
+1. Read index.md and scan all wiki pages.
+2. Check for:
+   - **Contradictions** — pages that disagree with each other
+   - **Stale claims** — information that newer entries have superseded
+   - **Orphan pages** — pages with no inbound links from other pages
+   - **Missing pages** — concepts or entities mentioned but lacking their own page
+   - **Missing cross-references** — related pages that should link to each other but don't
+   - **Broken links** — links that point to pages that don't exist
+3. Fix what you can (add missing links, remove broken links, update stale claims).
+4. Report what you found and what you fixed.
+5. Append a lint entry to log.md.
+6. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you found and fixed>\`
 
 ## Index maintenance — index.md
 
@@ -160,11 +221,27 @@ Format:
 ## Concepts
 
 - [Concept Name](concepts/concept-name.md) — One-line summary
+
+## Clients
+
+- [Client Name](clients/client-name.md) — One-line summary
+
+## Company
+
+- [Topic](company/topic.md) — One-line summary
+
+## Personal
+
+- [Topic](personal/topic.md) — One-line summary
+
+## People
+
+- [Person Name](people/person-name.md) — One-line summary
 \`\`\`
 
 Rules:
 - One line per page: link + one-line summary (under 100 chars)
-- Grouped by project, then concepts
+- Grouped by category: Projects, Concepts, Clients, Company, Personal, People
 - Alphabetical within each group
 - Update on every ingest — add new entries, revise summaries for updated pages
 - Remove entries for deleted pages
@@ -213,6 +290,22 @@ const INDEX_CONTENT = `# Hive Mind — Index
 ## Concepts
 
 (No concepts yet)
+
+## Clients
+
+(No clients yet)
+
+## Company
+
+(No company knowledge yet)
+
+## Personal
+
+(No personal knowledge yet)
+
+## People
+
+(No people yet)
 `;
 
 const LOG_CONTENT = `# Hive Mind — Log
@@ -386,4 +479,89 @@ export function runHiveManual(
   ].join(" ");
 
   return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
+}
+
+export function runHiveQuery(
+  userPrompt: string,
+  claudeConfigDir: string,
+  profileName: string
+): Promise<HiveAnalysisResult> {
+  const prompt = [
+    `You are querying the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+    `This is a READ-ONLY query. Do NOT create, modify, or delete any wiki pages.`,
+    `Answer the following question using the wiki's content:`,
+    userPrompt,
+    `When done, print a HIVE_SUMMARY line as described in the schema.`,
+  ].join(" ");
+
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
+}
+
+export function runHiveLint(
+  claudeConfigDir: string,
+  profileName: string
+): Promise<HiveAnalysisResult> {
+  const prompt = [
+    `You are performing a health check on the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+    `Run the Lint operation as described in the schema.`,
+    `Check for contradictions, stale claims, orphan pages, missing pages, missing cross-references, and broken links.`,
+    `Fix what you can, report what you found.`,
+    `When done, print a HIVE_SUMMARY line as described in the schema.`,
+  ].join(" ");
+
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
+}
+
+export function runHiveFileIngest(
+  filePath: string,
+  focusPrompt: string | undefined,
+  claudeConfigDir: string,
+  profileName: string
+): Promise<HiveAnalysisResult> {
+  const parts = [
+    `You are maintaining the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+    `Read the file at ${filePath} and extract knowledge from it.`,
+  ];
+  if (focusPrompt) {
+    parts.push(`Focus on: ${focusPrompt}`);
+  }
+  parts.push(`Upsert into the wiki, update index, append to log.`);
+  parts.push(`When done, print a HIVE_SUMMARY line as described in the schema.`);
+
+  return spawnHiveSession(parts.join(" "), [dirname(filePath)], claudeConfigDir, profileName);
+}
+
+// --- cross-session context injection ---
+
+export async function buildProjectContext(projectName: string): Promise<string | null> {
+  const projectDir = join(HIVE_DIR, "projects", projectName);
+
+  let files: string[];
+  try {
+    files = (await readdir(projectDir)).filter((f) => f.endsWith(".md"));
+  } catch {
+    return null;
+  }
+
+  if (files.length === 0) return null;
+
+  const sections: string[] = [];
+  for (const file of files) {
+    try {
+      const content = await readFile(join(projectDir, file), "utf8");
+      sections.push(content);
+    } catch {
+      continue;
+    }
+  }
+
+  if (sections.length === 0) return null;
+
+  return [
+    `# Hive Mind — Prior knowledge for project "${projectName}"`,
+    "",
+    "The following is accumulated knowledge from previous sessions and manual input, maintained in the Hive Mind wiki.",
+    "",
+    ...sections,
+  ].join("\n");
 }
