@@ -396,13 +396,14 @@ function spawnHiveSession(
   profileName: string
 ): Promise<HiveAnalysisResult> {
   return new Promise((resolve) => {
+    // Pass prompt via stdin (not as positional arg) because --add-dir is
+    // variadic in claude CLI and would consume the prompt as a directory.
     const args = [
       "-p",
       "--dangerously-skip-permissions",
       "--no-session-persistence",
       "--add-dir", HIVE_DIR,
       ...extraAddDirs.flatMap((dir) => ["--add-dir", dir]),
-      prompt,
     ];
 
     const env = { ...process.env };
@@ -412,8 +413,11 @@ function spawnHiveSession(
 
     const child = spawn("claude", args, {
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
 
     let stdout = "";
     let stderr = "";
