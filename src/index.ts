@@ -7,6 +7,9 @@ import { access, readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { platform } from "node:os";
 import { createInterface } from "node:readline";
+import { createRequire } from "node:module";
+
+const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
 import {
   ensureClauthDir,
   ensureDefaultProfile,
@@ -55,7 +58,7 @@ const program = new Command();
 program
   .name("clauth")
   .description("Manage multiple Claude CLI account profiles")
-  .version("1.1.0");
+  .version(pkg.version);
 
 // --- add ---
 program
