@@ -1,6 +1,6 @@
 # clauth
 
-Manage multiple Claude CLI account profiles. Switch between accounts, track per-profile usage stats, and launch Claude with per-directory profile memory.
+Manage multiple Claude CLI account profiles. Switch between accounts, track per-profile usage stats, launch Claude with per-directory profile memory, and build a persistent knowledge wiki that compounds across sessions (Hive Mind).
 
 ## Install
 
@@ -78,9 +78,11 @@ clauth config work
 
 # Enable --dangerously-skip-permissions for a profile
 clauth config work --skip-permissions
-
-# Disable it
 clauth config work --no-skip-permissions
+
+# Enable Hive Mind for a profile (see below)
+clauth config work --hive-mind
+clauth config work --no-hive-mind
 ```
 
 ### `clauth stats [name]`
@@ -109,30 +111,111 @@ Interactive wizard that walks you through creating profiles and configuring them
 clauth setup
 ```
 
+### `clauth hive [prompt]`
+
+Feed knowledge into the Hive Mind wiki, query it, or browse it. See the **Hive Mind** section below for the full picture.
+
+```bash
+# Feed knowledge manually (ingest)
+clauth hive "decided to use Postgres for project X because we need transactions"
+
+# Query the wiki (read-only)
+clauth hive --query "what databases am I using across projects?"
+
+# Health-check the wiki (find contradictions, orphans, broken links)
+clauth hive --lint
+
+# Ingest a file (markdown, text, PDF)
+clauth hive --file meeting-notes.md
+clauth hive --file report.pdf "focus on the client requirements section"
+
+# Browse the wiki (instant, no LLM)
+clauth hive --index           # print the content catalog
+clauth hive --log             # print the last 10 log entries
+clauth hive --log 30          # print the last 30 entries
+clauth hive --open            # open the wiki directory in your file manager
+```
+
+## Hive Mind
+
+A personal knowledge wiki that the LLM builds and maintains for you. It captures decisions, problems, tradeoffs, architecture, and context from your Claude Code sessions and makes them available to future sessions.
+
+The wiki is a folder of markdown files at `~/.clauth/hive/` — open it in Obsidian for a visual knowledge graph.
+
+### Enable it
+
+```bash
+clauth config <profile> --hive-mind
+```
+
+When enabled, after every Claude session ends under that profile, clauth spawns a headless analysis session that reads the session log and upserts extracted knowledge into the wiki. Runs synchronously with a brief summary.
+
+### Two feed paths
+
+**1. Automatic** — Claude Code sessions are analyzed after they end. Decisions, problems, tradeoffs, and architecture are extracted and filed into the appropriate wiki pages.
+
+**2. Manual** — `clauth hive "<prompt>"` feeds knowledge directly. Useful for decisions made in meetings, context from Slack, corrections, or anything that didn't come from a session. Also supports file ingest via `--file`.
+
+### Categories
+
+The wiki organizes knowledge across six categories:
+
+| Category | What goes here |
+|----------|----------------|
+| `projects/` | Per-project technical knowledge (decisions, architecture, problems) |
+| `concepts/` | Cross-project patterns, tools, techniques |
+| `clients/` | Customer profiles, ownership, requirements |
+| `company/` | Internal organization — team, processes, strategy |
+| `personal/` | Health, interests, goals, habits |
+| `people/` | Contacts, collaborators, stakeholders |
+
+Pages use YAML frontmatter and relative markdown links. Obsidian-compatible out of the box.
+
+### Context injection
+
+When you launch a session in a project that already has wiki pages, clauth injects the accumulated knowledge into Claude's system prompt. The session starts already knowing your prior decisions and context — no need to re-explain.
+
+### The schema
+
+The wiki has its own `CLAUDE.md` at `~/.clauth/hive/CLAUDE.md` that governs how the LLM maintains it — page format, operation rules, create-vs-update logic. It's co-evolved over time. To refresh it from the latest clauth version: delete the file and run any clauth command to regenerate.
+
 ## How It Works
 
 Profiles are stored under `~/.clauth/`. Each profile gets its own directory that acts as an isolated Claude configuration directory.
 
 - **default** — automatically created, points to your existing `~/.claude` config
 - **Other profiles** — stored as `~/.clauth/<name>/` and launched with `CLAUDE_CONFIG_DIR` set accordingly
+- **hive** — reserved name for the Hive Mind wiki directory (not a profile)
 
 When you launch a profile, clauth:
 1. Records it as the last-used profile for the current directory (`~/.clauth/folders.json`)
 2. Sets `CLAUDE_CONFIG_DIR` to the profile's directory (except for `default`)
-3. Spawns `claude` with any configured flags and passthrough arguments
+3. If Hive Mind is enabled, injects accumulated project knowledge via `--append-system-prompt`
+4. Spawns `claude` with any configured flags and passthrough arguments
+5. After the session exits, if Hive Mind is enabled, runs a headless analysis session that upserts new knowledge into the wiki
 
 ## Directory Structure
 
 ```
 ~/.clauth/
   ├── default/          # metadata for the default profile
-  │   └── clauth.json   # per-profile config (e.g. skipPermissions)
+  │   └── clauth.json   # per-profile config (e.g. skipPermissions, hiveMind)
   ├── work/             # full Claude config dir for "work"
   │   ├── clauth.json
   │   ├── credentials.json
   │   └── ...
   ├── personal/
   │   └── ...
+  ├── hive/             # Hive Mind wiki (see above)
+  │   ├── CLAUDE.md     # schema — how the LLM maintains the wiki
+  │   ├── index.md      # content catalog
+  │   ├── log.md        # chronological record of ingests and queries
+  │   ├── projects/
+  │   ├── concepts/
+  │   ├── clients/
+  │   ├── company/
+  │   ├── personal/
+  │   └── people/
   ├── folders.json      # directory → profile mapping
   └── .last             # globally last-used profile name
 ```
