@@ -16,7 +16,11 @@
     "dev": "tsc --watch",
     "dev:ui": "cd ui-web && npm run dev",
     "start": "node dist/index.js",
-    "link": "npm run build && npm link"
+    "link": "npm run build && npm link",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "claude",
