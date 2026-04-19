@@ -155,6 +155,7 @@ clauth hive --index           # print the content catalog
 clauth hive --log             # print the last 10 log entries
 clauth hive --log 30          # print the last 30 entries
 clauth hive --open            # open the wiki directory in your file manager
+clauth hive --obsidian        # open the wiki in Obsidian (requires Obsidian 1.0+)
 ```
 
 ## Hive Mind

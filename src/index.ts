@@ -3,9 +3,10 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { spawn } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
-import { resolve, join } from "node:path";
-import { platform } from "node:os";
+import { access, readFile, writeFile, mkdir } from "node:fs/promises";
+import { resolve, join, dirname } from "node:path";
+import { platform, homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 
@@ -45,6 +46,20 @@ import {
   getHiveDir,
   buildProjectContext,
 } from "./hive.js";
+
+function getObsidianConfigPath(): string | null {
+  const p = platform();
+  if (p === "darwin") return join(homedir(), "Library", "Application Support", "obsidian", "obsidian.json");
+  if (p === "win32") {
+    const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
+    return join(appData, "obsidian", "obsidian.json");
+  }
+  if (p === "linux") {
+    const configHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+    return join(configHome, "obsidian", "obsidian.json");
+  }
+  return null;
+}
 
 // Extract passthrough args (everything after --) before Commander parses
 const dashIdx = process.argv.indexOf("--");
@@ -216,9 +231,10 @@ program
   .option("--index", "Print the wiki index")
   .option("--log [n]", "Print the last n log entries (default: 10)")
   .option("--open", "Open the wiki directory in the system file manager")
+  .option("--obsidian", "Open the wiki in Obsidian (requires Obsidian 1.0+)")
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
-    index?: boolean; log?: string | boolean; open?: boolean;
+    index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
   }) => {
     try {
       // --- Phase 10: local browse commands (no LLM needed) ---
@@ -252,6 +268,45 @@ program
         const cmd = platform() === "darwin" ? "open" : platform() === "win32" ? "explorer" : "xdg-open";
         spawn(cmd, [getHiveDir()], { detached: true, stdio: "ignore" }).unref();
         console.log(chalk.dim(`  Opened ${getHiveDir()}`));
+        return;
+      }
+
+      if (opts.obsidian) {
+        const hiveDir = getHiveDir();
+        const configPath = getObsidianConfigPath();
+        if (!configPath) {
+          console.log(chalk.red("  Unsupported platform for --obsidian"));
+          return;
+        }
+
+        // Obsidian only treats a folder as a vault if it contains a .obsidian/ dir.
+        // Without it, it falls back to the vault-picker screen even when open: true is set.
+        await mkdir(join(hiveDir, ".obsidian"), { recursive: true });
+
+        let config: { vaults?: Record<string, { path: string; ts?: number; open?: boolean }> } = {};
+        try {
+          config = JSON.parse(await readFile(configPath, "utf8"));
+        } catch {
+          await mkdir(dirname(configPath), { recursive: true });
+        }
+        if (!config.vaults) config.vaults = {};
+
+        let vaultId = Object.keys(config.vaults).find((id) => config.vaults![id].path === hiveDir);
+        if (!vaultId) {
+          vaultId = randomBytes(8).toString("hex");
+          config.vaults[vaultId] = { path: hiveDir, ts: Date.now() };
+        }
+        config.vaults[vaultId].open = true;
+
+        await writeFile(configPath, JSON.stringify(config, null, 2));
+
+        if (platform() === "darwin") {
+          spawn("open", ["-a", "Obsidian"], { detached: true, stdio: "ignore" }).unref();
+        } else {
+          spawn("obsidian", [], { detached: true, stdio: "ignore" }).unref();
+        }
+        console.log(chalk.dim(`  Registered ${hiveDir} as an Obsidian vault and launched Obsidian`));
+        console.log(chalk.dim("  (If Obsidian was already running, quit it and rerun this command)"));
         return;
       }
 
