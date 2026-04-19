@@ -207,14 +207,7 @@ export interface StatsCache {
 
 export async function getStats(name: string): Promise<StatsCache | null> {
   const dir = getClaudeConfigDir(name);
-  const file = join(dir, "stats-cache.json");
-  try {
-    const data = await readFile(file, "utf8");
-    return JSON.parse(data) as StatsCache;
-  } catch {
-    // No stats-cache.json — compute from session JSONL files
-    return computeStatsFromSessions(dir);
-  }
+  return computeStatsFromSessions(dir);
 }
 
 export interface ProfileInfo {
