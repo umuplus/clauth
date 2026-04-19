@@ -524,7 +524,8 @@ export function runHiveAnalysis(
   logPath: string,
   projectName: string,
   claudeConfigDir: string,
-  profileName: string
+  profileName: string,
+  onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
   const prompt = [
     `Analyze the Claude Code session log at ${logPath} for project "${projectName}".`,
@@ -534,7 +535,7 @@ export function runHiveAnalysis(
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [dirname(logPath)], claudeConfigDir, profileName);
+  return spawnHiveSession(prompt, [dirname(logPath)], claudeConfigDir, profileName, onEvent);
 }
 
 export function runHiveManual(
