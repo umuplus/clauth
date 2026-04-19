@@ -391,7 +391,7 @@ export interface HiveAnalysisResult {
 
 export type HiveStreamEvent =
   | { kind: "text"; text: string }
-  | { kind: "tool"; name: string }
+  | { kind: "tool"; name: string; detail?: string }
   | { kind: "system"; message: string };
 
 export type HiveOnEvent = (event: HiveStreamEvent) => void;
@@ -401,6 +401,42 @@ function extractSummary(text: string): string | null {
     .split("\n")
     .find((l) => l.startsWith("HIVE_SUMMARY:"));
   return line ? line.replace("HIVE_SUMMARY:", "").trim() : null;
+}
+
+function shorten(s: string, max = 70): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+}
+
+function formatToolDetail(name: string, input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const i = input as Record<string, unknown>;
+  const str = (k: string) => (typeof i[k] === "string" ? (i[k] as string) : undefined);
+  switch (name) {
+    case "Read":
+    case "Edit":
+    case "Write":
+    case "NotebookEdit":
+      return str("file_path");
+    case "Bash":
+      return str("command") ? shorten(str("command")!) : str("description");
+    case "Grep": {
+      const pattern = str("pattern");
+      const path = str("path") ?? str("glob");
+      return pattern ? (path ? `${pattern} in ${path}` : pattern) : undefined;
+    }
+    case "Glob":
+      return str("pattern");
+    case "WebFetch":
+      return str("url");
+    case "WebSearch":
+      return str("query");
+    case "Task":
+    case "Agent":
+      return str("description");
+    default:
+      return undefined;
+  }
 }
 
 function handleStreamLine(line: string, onEvent: HiveOnEvent): void {
@@ -413,11 +449,12 @@ function handleStreamLine(line: string, onEvent: HiveOnEvent): void {
   if (!ev || typeof ev !== "object") return;
   const e = ev as { type?: string; subtype?: string; message?: { content?: unknown[] } };
   if (e.type === "assistant" && Array.isArray(e.message?.content)) {
-    for (const block of e.message!.content as Array<{ type?: string; text?: string; name?: string }>) {
+    for (const block of e.message!.content as Array<{ type?: string; text?: string; name?: string; input?: unknown }>) {
       if (block.type === "text" && typeof block.text === "string") {
         onEvent({ kind: "text", text: block.text });
       } else if (block.type === "tool_use" && typeof block.name === "string") {
-        onEvent({ kind: "tool", name: block.name });
+        const detail = formatToolDetail(block.name, block.input);
+        onEvent({ kind: "tool", name: block.name, detail });
       }
     }
   } else if (e.type === "system" && e.subtype === "init") {

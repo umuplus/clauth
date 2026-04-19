@@ -469,7 +469,8 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
           console.log(chalk.dim("\n  hive: analyzing session..."));
           const result = await runHiveAnalysis(logPath, getProjectName(), claudeDir, name, (ev) => {
             if (ev.kind === "tool") {
-              console.log(chalk.dim(`  hive · ${ev.name}`));
+              const line = ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`;
+              console.log(chalk.dim(line));
             }
           });
           if (result.summary) {

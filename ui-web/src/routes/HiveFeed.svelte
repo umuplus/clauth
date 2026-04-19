@@ -14,7 +14,7 @@
     if (ev.kind === "text") {
       progress = [...progress, ev.text];
     } else if (ev.kind === "tool") {
-      progress = [...progress, `→ ${ev.name}`];
+      progress = [...progress, ev.detail ? `→ ${ev.name} ${ev.detail}` : `→ ${ev.name}`];
     } else if (ev.kind === "system") {
       progress = [...progress, `· ${ev.message}`];
     }

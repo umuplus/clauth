@@ -36,7 +36,7 @@ export interface HiveResult {
 
 export type HiveStreamEvent =
   | { kind: "text"; text: string }
-  | { kind: "tool"; name: string }
+  | { kind: "tool"; name: string; detail?: string }
   | { kind: "system"; message: string };
 
 export interface StatsCache {
