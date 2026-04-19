@@ -389,15 +389,53 @@ export interface HiveAnalysisResult {
   error: string | null;
 }
 
+export type HiveStreamEvent =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; name: string }
+  | { kind: "system"; message: string };
+
+export type HiveOnEvent = (event: HiveStreamEvent) => void;
+
+function extractSummary(text: string): string | null {
+  const line = text
+    .split("\n")
+    .find((l) => l.startsWith("HIVE_SUMMARY:"));
+  return line ? line.replace("HIVE_SUMMARY:", "").trim() : null;
+}
+
+function handleStreamLine(line: string, onEvent: HiveOnEvent): void {
+  let ev: unknown;
+  try {
+    ev = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!ev || typeof ev !== "object") return;
+  const e = ev as { type?: string; subtype?: string; message?: { content?: unknown[] } };
+  if (e.type === "assistant" && Array.isArray(e.message?.content)) {
+    for (const block of e.message!.content as Array<{ type?: string; text?: string; name?: string }>) {
+      if (block.type === "text" && typeof block.text === "string") {
+        onEvent({ kind: "text", text: block.text });
+      } else if (block.type === "tool_use" && typeof block.name === "string") {
+        onEvent({ kind: "tool", name: block.name });
+      }
+    }
+  } else if (e.type === "system" && e.subtype === "init") {
+    onEvent({ kind: "system", message: "session started" });
+  }
+}
+
 function spawnHiveSession(
   prompt: string,
   extraAddDirs: string[],
   claudeConfigDir: string,
-  profileName: string
+  profileName: string,
+  onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
   return new Promise((resolve) => {
     // Pass prompt via stdin (not as positional arg) because --add-dir is
     // variadic in claude CLI and would consume the prompt as a directory.
+    const useStream = !!onEvent;
     const args = [
       "-p",
       "--dangerously-skip-permissions",
@@ -405,6 +443,10 @@ function spawnHiveSession(
       "--add-dir", HIVE_DIR,
       ...extraAddDirs.flatMap((dir) => ["--add-dir", dir]),
     ];
+    if (useStream) {
+      // stream-json requires --verbose in non-interactive mode
+      args.push("--output-format", "stream-json", "--verbose");
+    }
 
     const env = { ...process.env };
     if (profileName !== "default") {
@@ -421,9 +463,19 @@ function spawnHiveSession(
 
     let stdout = "";
     let stderr = "";
+    let buf = "";
 
     child.stdout.on("data", (data: Buffer) => {
-      stdout += data.toString();
+      const text = data.toString();
+      stdout += text;
+      if (!useStream) return;
+      buf += text;
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (line) handleStreamLine(line, onEvent!);
+      }
     });
 
     child.stderr.on("data", (data: Buffer) => {
@@ -440,15 +492,30 @@ function spawnHiveSession(
         return;
       }
 
-      const summaryLine = stdout
-        .split("\n")
-        .find((line) => line.startsWith("HIVE_SUMMARY:"));
+      if (!useStream) {
+        resolve({ summary: extractSummary(stdout), error: null });
+        return;
+      }
 
-      const summary = summaryLine
-        ? summaryLine.replace("HIVE_SUMMARY:", "").trim()
-        : null;
-
-      resolve({ summary, error: null });
+      // In stream-json mode the summary may live inside a content block
+      // or the final result event. Concatenate all assistant text.
+      let allText = "";
+      for (const line of stdout.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const ev = JSON.parse(line);
+          if (ev.type === "assistant" && Array.isArray(ev.message?.content)) {
+            for (const b of ev.message.content) {
+              if (b.type === "text" && typeof b.text === "string") allText += b.text + "\n";
+            }
+          } else if (ev.type === "result" && typeof ev.result === "string") {
+            allText += ev.result + "\n";
+          }
+        } catch {
+          continue;
+        }
+      }
+      resolve({ summary: extractSummary(allText), error: null });
     });
   });
 }
@@ -473,7 +540,8 @@ export function runHiveAnalysis(
 export function runHiveManual(
   userPrompt: string,
   claudeConfigDir: string,
-  profileName: string
+  profileName: string,
+  onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
   const prompt = [
     `You are maintaining the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
@@ -482,13 +550,14 @@ export function runHiveManual(
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
 }
 
 export function runHiveQuery(
   userPrompt: string,
   claudeConfigDir: string,
-  profileName: string
+  profileName: string,
+  onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
   const prompt = [
     `You are querying the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
@@ -498,12 +567,13 @@ export function runHiveQuery(
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
 }
 
 export function runHiveLint(
   claudeConfigDir: string,
-  profileName: string
+  profileName: string,
+  onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
   const prompt = [
     `You are performing a health check on the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
@@ -513,14 +583,15 @@ export function runHiveLint(
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [], claudeConfigDir, profileName);
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
 }
 
 export function runHiveFileIngest(
   filePath: string,
   focusPrompt: string | undefined,
   claudeConfigDir: string,
-  profileName: string
+  profileName: string,
+  onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
   const parts = [
     `You are maintaining the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
@@ -532,7 +603,7 @@ export function runHiveFileIngest(
   parts.push(`Upsert into the wiki, update index, append to log.`);
   parts.push(`When done, print a HIVE_SUMMARY line as described in the schema.`);
 
-  return spawnHiveSession(parts.join(" "), [dirname(filePath)], claudeConfigDir, profileName);
+  return spawnHiveSession(parts.join(" "), [dirname(filePath)], claudeConfigDir, profileName, onEvent);
 }
 
 // --- cross-session context injection ---

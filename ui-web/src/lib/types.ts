@@ -34,6 +34,11 @@ export interface HiveResult {
   error: string | null;
 }
 
+export type HiveStreamEvent =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; name: string }
+  | { kind: "system"; message: string };
+
 export interface StatsCache {
   totalSessions: number;
   totalMessages: number;

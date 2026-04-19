@@ -4,6 +4,7 @@ import type {
   WikiPageContent,
   LogEntry,
   HiveResult,
+  HiveStreamEvent,
   StatsCache,
 } from "./types";
 
@@ -20,6 +21,54 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${res.status} ${body}`);
   }
   return res.json() as Promise<T>;
+}
+
+async function* parseSSE(
+  reader: ReadableStreamDefaultReader<Uint8Array>
+): AsyncGenerator<{ event: string; data: string }> {
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const chunk = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message";
+      let data = "";
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trimStart();
+      }
+      yield { event, data };
+    }
+  }
+}
+
+async function streamHive(
+  path: string,
+  init: RequestInit,
+  onProgress?: (ev: HiveStreamEvent) => void
+): Promise<HiveResult> {
+  const res = await fetch(path, init);
+  if (!res.ok || !res.body) {
+    const text = res.body ? await res.text() : "";
+    throw new Error(`${res.status} ${text}`);
+  }
+  const reader = res.body.getReader();
+  let result: HiveResult | null = null;
+  for await (const evt of parseSSE(reader)) {
+    if (evt.event === "progress" && onProgress) {
+      try { onProgress(JSON.parse(evt.data) as HiveStreamEvent); } catch { /* ignore */ }
+    } else if (evt.event === "done") {
+      try { result = JSON.parse(evt.data) as HiveResult; } catch { /* ignore */ }
+    } else if (evt.event === "error") {
+      result = { summary: null, error: evt.data || "stream error" };
+    }
+  }
+  return result ?? { summary: null, error: "stream ended without result" };
 }
 
 export const api = {
@@ -41,31 +90,38 @@ export const api = {
   getWikiPage: (path: string) =>
     request<WikiPageContent>(`/api/hive/page/${path}`),
 
-  // Hive operations (LLM)
-  feedHive: (prompt: string) =>
-    request<HiveResult>("/api/hive/feed", {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
-    }),
-  queryHive: (prompt: string) =>
-    request<HiveResult>("/api/hive/query", {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
-    }),
-  lintHive: () =>
-    request<HiveResult>("/api/hive/lint", { method: "POST" }),
-  uploadFile: async (file: File, focus?: string): Promise<HiveResult> => {
+  // Hive operations (LLM, SSE-streamed)
+  feedHive: (prompt: string, onProgress?: (ev: HiveStreamEvent) => void) =>
+    streamHive(
+      "/api/hive/feed",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      },
+      onProgress
+    ),
+  queryHive: (prompt: string, onProgress?: (ev: HiveStreamEvent) => void) =>
+    streamHive(
+      "/api/hive/query",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      },
+      onProgress
+    ),
+  lintHive: (onProgress?: (ev: HiveStreamEvent) => void) =>
+    streamHive("/api/hive/lint", { method: "POST" }, onProgress),
+  uploadFile: (
+    file: File,
+    focus?: string,
+    onProgress?: (ev: HiveStreamEvent) => void
+  ): Promise<HiveResult> => {
     const form = new FormData();
     form.append("file", file);
     if (focus) form.append("focus", focus);
-    const res = await fetch("/api/hive/file", {
-      method: "POST",
-      body: form,
-    });
-    if (!res.ok) {
-      throw new Error(`${res.status} ${await res.text()}`);
-    }
-    return res.json() as Promise<HiveResult>;
+    return streamHive("/api/hive/file", { method: "POST", body: form }, onProgress);
   },
 
   // Stats

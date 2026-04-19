@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from "../lib/api";
-  import type { HiveResult } from "../lib/types";
+  import type { HiveResult, HiveStreamEvent } from "../lib/types";
 
   let prompt = $state("");
   let focusPrompt = $state("");
@@ -8,13 +8,25 @@
   let submitting = $state(false);
   let result = $state<HiveResult | null>(null);
   let dragOver = $state(false);
+  let progress = $state<string[]>([]);
+
+  function onProgress(ev: HiveStreamEvent) {
+    if (ev.kind === "text") {
+      progress = [...progress, ev.text];
+    } else if (ev.kind === "tool") {
+      progress = [...progress, `→ ${ev.name}`];
+    } else if (ev.kind === "system") {
+      progress = [...progress, `· ${ev.message}`];
+    }
+  }
 
   async function submitText() {
     if (!prompt.trim()) return;
     submitting = true;
     result = null;
+    progress = [];
     try {
-      result = await api.feedHive(prompt);
+      result = await api.feedHive(prompt, onProgress);
       if (result.summary && !result.error) prompt = "";
     } catch (err) {
       result = { summary: null, error: String(err) };
@@ -27,8 +39,9 @@
     if (!file) return;
     submitting = true;
     result = null;
+    progress = [];
     try {
-      result = await api.uploadFile(file, focusPrompt.trim() || undefined);
+      result = await api.uploadFile(file, focusPrompt.trim() || undefined, onProgress);
       if (result.summary && !result.error) {
         file = null;
         focusPrompt = "";
@@ -129,6 +142,13 @@
         </div>
       {/if}
     </div>
+
+    {#if submitting && progress.length > 0}
+      <div class="card">
+        <div class="text-xs uppercase tracking-wider text-neutral-500 mb-2">Live</div>
+        <div class="text-xs text-neutral-300 font-mono whitespace-pre-wrap max-h-64 overflow-auto">{progress.join("\n")}</div>
+      </div>
+    {/if}
 
     {#if result}
       {#if result.summary}

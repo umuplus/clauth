@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { streamSSE } from "hono/streaming";
 import { readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,6 +9,8 @@ import {
   runHiveQuery,
   runHiveLint,
   runHiveFileIngest,
+  type HiveStreamEvent,
+  type HiveAnalysisResult,
 } from "../../hive.js";
 import {
   getClaudeConfigDir,
@@ -121,7 +124,42 @@ hiveRoutes.get("/page/:path{.+}", async (c) => {
   }
 });
 
-// --- LLM-backed endpoints ---
+// --- LLM-backed endpoints (SSE streaming) ---
+
+async function streamRun(
+  c: Context,
+  run: (onEvent: (e: HiveStreamEvent) => void) => Promise<HiveAnalysisResult>
+) {
+  return streamSSE(c, async (stream) => {
+    const queue: HiveStreamEvent[] = [];
+    let waiter: (() => void) | null = null;
+    let finished = false;
+
+    const onEvent = (e: HiveStreamEvent) => {
+      queue.push(e);
+      waiter?.();
+      waiter = null;
+    };
+
+    const runPromise = run(onEvent).finally(() => {
+      finished = true;
+      waiter?.();
+      waiter = null;
+    });
+
+    while (true) {
+      while (queue.length > 0) {
+        const e = queue.shift()!;
+        await stream.writeSSE({ event: "progress", data: JSON.stringify(e) });
+      }
+      if (finished) break;
+      await new Promise<void>((r) => { waiter = r; });
+    }
+
+    const result = await runPromise;
+    await stream.writeSSE({ event: "done", data: JSON.stringify(result) });
+  });
+}
 
 hiveRoutes.post("/feed", async (c) => {
   const { prompt } = await c.req.json<{ prompt: string }>();
@@ -134,8 +172,9 @@ hiveRoutes.post("/feed", async (c) => {
     return c.json({ error: "no profile found; run clauth launch <name> first" }, 400);
   }
 
-  const result = await runHiveManual(prompt, profile.dir, profile.name);
-  return c.json(result);
+  return streamRun(c, (onEvent) =>
+    runHiveManual(prompt, profile.dir, profile.name, onEvent)
+  );
 });
 
 hiveRoutes.post("/query", async (c) => {
@@ -149,8 +188,9 @@ hiveRoutes.post("/query", async (c) => {
     return c.json({ error: "no profile found" }, 400);
   }
 
-  const result = await runHiveQuery(prompt, profile.dir, profile.name);
-  return c.json(result);
+  return streamRun(c, (onEvent) =>
+    runHiveQuery(prompt, profile.dir, profile.name, onEvent)
+  );
 });
 
 hiveRoutes.post("/lint", async (c) => {
@@ -159,8 +199,9 @@ hiveRoutes.post("/lint", async (c) => {
     return c.json({ error: "no profile found" }, 400);
   }
 
-  const result = await runHiveLint(profile.dir, profile.name);
-  return c.json(result);
+  return streamRun(c, (onEvent) =>
+    runHiveLint(profile.dir, profile.name, onEvent)
+  );
 });
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -190,6 +231,7 @@ hiveRoutes.post("/file", async (c) => {
   const buf = Buffer.from(await file.arrayBuffer());
   await writeFile(tmpPath, buf);
 
-  const result = await runHiveFileIngest(tmpPath, focus, profile.dir, profile.name);
-  return c.json(result);
+  return streamRun(c, (onEvent) =>
+    runHiveFileIngest(tmpPath, focus, profile.dir, profile.name, onEvent)
+  );
 });

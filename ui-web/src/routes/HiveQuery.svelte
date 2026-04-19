@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from "../lib/api";
+  import type { HiveStreamEvent } from "../lib/types";
 
   interface Message {
     role: "user" | "assistant";
@@ -11,6 +12,17 @@
   let input = $state("");
   let submitting = $state(false);
   let linting = $state(false);
+  let progress = $state<string[]>([]);
+
+  function onProgress(ev: HiveStreamEvent) {
+    if (ev.kind === "text") {
+      progress = [...progress, ev.text];
+    } else if (ev.kind === "tool") {
+      progress = [...progress, `→ ${ev.name}`];
+    } else if (ev.kind === "system") {
+      progress = [...progress, `· ${ev.message}`];
+    }
+  }
 
   async function submit() {
     const prompt = input.trim();
@@ -18,8 +30,9 @@
     messages = [...messages, { role: "user", content: prompt }];
     input = "";
     submitting = true;
+    progress = [];
     try {
-      const res = await api.queryHive(prompt);
+      const res = await api.queryHive(prompt, onProgress);
       if (res.summary) {
         messages = [...messages, { role: "assistant", content: res.summary }];
       } else if (res.error) {
@@ -39,8 +52,9 @@
 
   async function runLint() {
     linting = true;
+    progress = [];
     try {
-      const res = await api.lintHive();
+      const res = await api.lintHive(onProgress);
       messages = [
         ...messages,
         { role: "user", content: "(lint)" },
@@ -105,13 +119,16 @@
           </div>
         </div>
       {/each}
-      {#if submitting}
+      {#if submitting || linting}
         <div class="flex gap-3">
-          <div class="max-w-[80%] rounded-lg px-4 py-3 text-sm bg-neutral-900 border border-neutral-800">
-            <div class="flex items-center gap-2 text-neutral-400">
+          <div class="max-w-[80%] rounded-lg px-4 py-3 text-sm bg-neutral-900 border border-neutral-800 w-full">
+            <div class="flex items-center gap-2 text-neutral-400 mb-2">
               <div class="w-2 h-2 rounded-full bg-accent animate-pulse"></div>
-              <span>Thinking...</span>
+              <span>{linting ? "Linting..." : "Thinking..."}</span>
             </div>
+            {#if progress.length > 0}
+              <div class="text-xs text-neutral-500 font-mono whitespace-pre-wrap max-h-48 overflow-auto">{progress.join("\n")}</div>
+            {/if}
           </div>
         </div>
       {/if}
