@@ -1,8 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../lib/api";
+  import { renderMarkdown, parseFrontmatter } from "../lib/markdown";
   import { wikiPages, navigate } from "../lib/stores";
-  import type { Category, WikiPage } from "../lib/types";
+  import type { Category, WikiPage, WikiPageContent } from "../lib/types";
+
+  let { path }: { path?: string } = $props();
 
   const categoryOrder: Category[] = [
     "projects",
@@ -18,6 +21,12 @@
   let loading = $state(true);
   let expandedProjects = $state<Record<string, boolean>>({});
 
+  let pageData = $state<WikiPageContent | null>(null);
+  let pageHtml = $state("");
+  let pageFrontmatter = $state<Record<string, string>>({});
+  let pageLoading = $state(false);
+  let pageError = $state<string | null>(null);
+
   onMount(async () => {
     try {
       const [p, idx] = await Promise.all([api.listWikiPages(), api.getHiveIndex()]);
@@ -26,6 +35,32 @@
     } finally {
       loading = false;
     }
+  });
+
+  $effect(() => {
+    const current = path;
+    if (!current) {
+      pageData = null;
+      pageHtml = "";
+      pageFrontmatter = {};
+      pageError = null;
+      return;
+    }
+    pageLoading = true;
+    pageError = null;
+    api
+      .getWikiPage(current)
+      .then((p) => {
+        pageData = p;
+        pageFrontmatter = parseFrontmatter(p.content);
+        pageHtml = renderMarkdown(p.content);
+      })
+      .catch((e) => {
+        pageError = String(e);
+      })
+      .finally(() => {
+        pageLoading = false;
+      });
   });
 
   let filtered = $derived.by(() => {
@@ -101,7 +136,7 @@
               projects
             </div>
             {#each Array.from(projectGroups.entries()).sort(([a], [b]) => a.localeCompare(b)) as [projectName, pages]}
-              {@const expanded = (expandedProjects[projectName] ?? false) || search.trim().length > 0}
+              {@const expanded = (expandedProjects[projectName] ?? false) || search.trim().length > 0 || pages.some((p) => p.path === path)}
               <button
                 class="nav-link w-full text-left"
                 onclick={() => toggleProject(projectName)}
@@ -117,7 +152,7 @@
                 <div class="ml-3 border-l border-neutral-800">
                   {#each pages.sort((a, b) => a.name.localeCompare(b.name)) as page}
                     <button
-                      class="nav-link w-full text-left pl-4"
+                      class="nav-link w-full text-left pl-4 {page.path === path ? 'active' : ''}"
                       onclick={() => navigate(`/hive/page/${page.path}`)}
                     >
                       <span class="truncate text-neutral-400">{pageLabel(page)}</span>
@@ -139,7 +174,7 @@
               </div>
               {#each pages.sort((a, b) => a.name.localeCompare(b.name)) as page}
                 <button
-                  class="nav-link w-full text-left"
+                  class="nav-link w-full text-left {page.path === path ? 'active' : ''}"
                   onclick={() => navigate(`/hive/page/${page.path}`)}
                 >
                   <span class="truncate">{pageLabel(page)}</span>
@@ -153,22 +188,51 @@
   </div>
 
   <div class="flex-1 overflow-auto p-8">
-    <div class="max-w-3xl mx-auto">
-      <div class="mb-6">
-        <h1 class="text-2xl font-semibold mb-1">Hive Wiki</h1>
-        <p class="text-sm text-neutral-400">Browse the accumulated knowledge from your sessions.</p>
-      </div>
+    {#if path}
+      <div class="max-w-4xl mx-auto">
+        {#if pageLoading}
+          <div class="text-sm text-neutral-500">Loading...</div>
+        {:else if pageError}
+          <div class="card border-red-900 bg-red-950/30">
+            <div class="text-sm text-red-400">{pageError}</div>
+          </div>
+        {:else if pageData}
+          <div class="mb-4 flex flex-wrap items-center gap-2">
+            <span class="badge bg-neutral-800 text-neutral-400 font-mono">{path}</span>
+            {#if pageFrontmatter.category}
+              <span class="badge bg-accent/20 text-accent">{pageFrontmatter.category}</span>
+            {/if}
+            {#if pageFrontmatter.project}
+              <span class="badge bg-blue-500/20 text-blue-400">{pageFrontmatter.project}</span>
+            {/if}
+            {#if pageFrontmatter.updated}
+              <span class="text-xs text-neutral-500 font-mono">updated {pageFrontmatter.updated}</span>
+            {/if}
+          </div>
 
-      {#if indexContent}
-        <div class="card">
-          <div class="text-xs uppercase tracking-wider text-neutral-500 mb-3">Index</div>
-          <pre class="text-sm font-mono text-neutral-300 whitespace-pre-wrap">{indexContent}</pre>
+          <article class="prose prose-invert prose-neutral max-w-none prose-pre:bg-neutral-900 prose-pre:border prose-pre:border-neutral-800 prose-code:text-accent prose-a:text-accent hover:prose-a:text-sky-300">
+            {@html pageHtml}
+          </article>
+        {/if}
+      </div>
+    {:else}
+      <div class="max-w-3xl mx-auto">
+        <div class="mb-6">
+          <h1 class="text-2xl font-semibold mb-1">Hive Wiki</h1>
+          <p class="text-sm text-neutral-400">Browse the accumulated knowledge from your sessions.</p>
         </div>
-      {:else}
-        <div class="card">
-          <div class="text-sm text-neutral-500">No index available.</div>
-        </div>
-      {/if}
-    </div>
+
+        {#if indexContent}
+          <div class="card">
+            <div class="text-xs uppercase tracking-wider text-neutral-500 mb-3">Index</div>
+            <pre class="text-sm font-mono text-neutral-300 whitespace-pre-wrap">{indexContent}</pre>
+          </div>
+        {:else}
+          <div class="card">
+            <div class="text-sm text-neutral-500">No index available.</div>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>

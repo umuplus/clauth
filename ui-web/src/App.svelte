@@ -7,7 +7,6 @@
   import HiveQuery from "./routes/HiveQuery.svelte";
   import HiveGraph from "./routes/HiveGraph.svelte";
   import Stats from "./routes/Stats.svelte";
-  import PageView from "./routes/PageView.svelte";
   import { currentRoute } from "./lib/stores";
 
   function matchRoute(route: string): {
@@ -22,7 +21,7 @@
     if (route === "/hive/graph") return { component: HiveGraph, params: {} };
     if (route === "/stats") return { component: Stats, params: {} };
     if (route.startsWith("/hive/page/")) {
-      return { component: PageView, params: { path: route.slice("/hive/page/".length) } };
+      return { component: HiveBrowser, params: { path: route.slice("/hive/page/".length) } };
     }
     return { component: Dashboard, params: {} };
   }
