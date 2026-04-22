@@ -10,8 +10,8 @@ export default {
       },
       colors: {
         accent: {
-          DEFAULT: "#ff8c42",
-          foreground: "#fff",
+          DEFAULT: "#38bdf8",
+          foreground: "#0b1220",
         },
       },
     },

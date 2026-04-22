@@ -29,7 +29,7 @@
   <aside class="w-56 border-r border-neutral-800 bg-neutral-950 flex flex-col">
     <div class="px-4 py-4 border-b border-neutral-800">
       <div class="flex items-center gap-2">
-        <div class="w-7 h-7 rounded-md bg-gradient-to-br from-orange-500 to-pink-500 flex items-center justify-center text-white font-bold text-sm">c</div>
+        <div class="w-7 h-7 rounded-md bg-gradient-to-br from-green-300 via-sky-400 to-blue-400 flex items-center justify-center text-white font-bold text-sm">c</div>
         <div>
           <div class="text-sm font-semibold text-neutral-100">clauth</div>
           <div class="text-[10px] text-neutral-500 uppercase tracking-wider">hive mind</div>
@@ -48,7 +48,7 @@
       {/each}
     </nav>
     <div class="px-4 py-3 border-t border-neutral-800">
-      <div class="text-[10px] text-neutral-600 font-mono">v1.1.0 · local</div>
+      <div class="text-[10px] text-neutral-600 font-mono">v1.5.0 · local</div>
     </div>
   </aside>
   <main class="flex-1 overflow-auto">
