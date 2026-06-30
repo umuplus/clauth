@@ -201,6 +201,25 @@ When you launch a session in a project that already has wiki pages, clauth injec
 
 The wiki has its own `CLAUDE.md` at `~/.clauth/hive/CLAUDE.md` that governs how the LLM maintains it — page format, operation rules, create-vs-update logic. It's co-evolved over time. To refresh it from the latest clauth version: delete the file and run any clauth command to regenerate.
 
+### Design lineage — Karpathy's LLM wiki
+
+Hive Mind is a direct implementation of the **LLM wiki** pattern proposed by Andrej Karpathy ([gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)). The core idea: instead of RAG rediscovering answers from raw documents on every query, an LLM maintains a *persistent, compounding* wiki where cross-references and synthesis already reflect everything it has read. The pattern has three layers — immutable raw sources, an LLM-owned wiki, and a schema that disciplines how the LLM maintains it — plus three workflows: **ingest**, **query**, and **lint**.
+
+**Where Hive Mind stays faithful to the pattern:**
+
+- **Three layers, intact.** Raw sources (session logs), the LLM-owned wiki (`~/.clauth/hive/`), and the governing schema (`hive/CLAUDE.md`) map one-to-one onto Karpathy's model.
+- **Schema as the disciplined maintainer.** The gist warns that without a schema the LLM "behaves like a generic chatbot." Hive Mind's `CLAUDE.md` encodes page format, the six categories, and explicit create-vs-update rules — exactly this role.
+- **LLM-only writes; humans curate.** Wiki pages are never hand-edited in the normal flow; the LLM owns synthesis while you direct what gets fed in.
+- **`index.md` + `log.md` navigation.** Surfaced as `clauth hive --index` and `--log`, mirroring the gist's catalog-and-chronicle pair.
+- **The lint workflow.** `clauth hive --lint` performs the health check Karpathy describes — contradictions, orphans, broken links, stale claims — and the same warning applies: skip it and "hallucinations slowly become the ground truth."
+- **Deterministic vs. LLM split.** `--index` / `--log` / `--open` browse the wiki with zero LLM calls, keeping token spend for synthesis and judgment, as the gist recommends.
+
+**Where Hive Mind deliberately diverges — adapted for its goal of a passive, personal knowledge base:**
+
+- **Source capture is inverted — and automated.** Karpathy's pattern assumes humans curate the raw sources and direct ingestion. Hive Mind's distinctive bet is the opposite: the primary "raw source" is your *coding sessions themselves*, ingested automatically by a post-session analyzer. The wiki compounds passively, without you stopping to file anything — at the cost of trading away human-in-the-loop curation, which makes the `--lint` discipline more load-bearing, not less. (The manual `clauth hive "<text>"` / `--file` path preserves the classic human-curated flow alongside it.)
+- **Closed-loop context injection.** The gist focuses on read/write within the wiki. Hive Mind adds a step beyond it: accumulated project knowledge is re-injected into future sessions via `--append-system-prompt`, so the wiki doesn't just answer queries — it silently primes the next session. This turns "compounding artifact" into a closed feedback loop specific to the coding-agent setting.
+- **Query is read-only by design.** Karpathy suggests queries should file valuable discoveries back into the wiki. Hive Mind keeps `--query` side-effect-free so reading never mutates the knowledge base; new knowledge enters only through the (automatic or manual) ingest paths, where it's subject to the schema's create-vs-update discipline. This is a deliberate trade — predictability over maximal compounding.
+
 ## How It Works
 
 Profiles are stored under `~/.clauth/`. Each profile gets its own directory that acts as an isolated Claude configuration directory.
