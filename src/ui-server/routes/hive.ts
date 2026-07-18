@@ -9,6 +9,13 @@ import {
   runHiveQuery,
   runHiveLint,
   runHiveFileIngest,
+  listHiveProjects,
+  listHivePages,
+  resetHiveProject,
+  resetHivePage,
+  resetHiveAll,
+  FLAT_CATEGORIES,
+  type HiveCategory,
   type HiveStreamEvent,
   type HiveAnalysisResult,
 } from "../../hive.js";
@@ -122,6 +129,66 @@ hiveRoutes.get("/page/:path{.+}", async (c) => {
   } catch {
     return c.json({ error: "page not found" }, 404);
   }
+});
+
+// --- reset endpoints (destructive, no LLM) ---
+
+hiveRoutes.get("/projects", async (c) => {
+  return c.json({ projects: await listHiveProjects() });
+});
+
+hiveRoutes.delete("/projects/:name", async (c) => {
+  const name = c.req.param("name");
+  const projects = await listHiveProjects();
+  if (!projects.includes(name)) {
+    return c.json({ error: `no hive knowledge for project "${name}"`, projects }, 404);
+  }
+
+  try {
+    await resetHiveProject(name, new Date().toISOString().slice(0, 10));
+  } catch (err) {
+    return c.json({ error: String(err) }, 400);
+  }
+  return c.json({ reset: name });
+});
+
+hiveRoutes.delete("/pages/:category/:name", async (c) => {
+  const category = c.req.param("category");
+  const name = c.req.param("name").replace(/\.md$/, "");
+
+  if (!FLAT_CATEGORIES.includes(category as (typeof FLAT_CATEGORIES)[number])) {
+    return c.json({ error: `invalid category "${category}"`, categories: FLAT_CATEGORIES }, 400);
+  }
+  const cat = category as HiveCategory;
+
+  const pages = await listHivePages(cat);
+  if (!pages.includes(name)) {
+    return c.json({ error: `no page "${name}" in ${category}`, pages }, 404);
+  }
+
+  try {
+    await resetHivePage(cat, name, new Date().toISOString().slice(0, 10));
+  } catch (err) {
+    return c.json({ error: String(err) }, 400);
+  }
+  return c.json({ reset: `${category}/${name}` });
+});
+
+// Full wipe. The body confirmation is deliberate friction: a stray DELETE to
+// this path should not be able to destroy the whole wiki.
+hiveRoutes.delete("/", async (c) => {
+  let confirm: unknown;
+  try {
+    ({ confirm } = await c.req.json<{ confirm?: unknown }>());
+  } catch {
+    confirm = undefined;
+  }
+  if (confirm !== "RESET") {
+    return c.json({ error: 'full reset requires {"confirm":"RESET"}' }, 400);
+  }
+
+  await resetHiveAll();
+  return c.json({ reset: "all" });
 });
 
 // --- LLM-backed endpoints (SSE streaming) ---

@@ -1,4 +1,4 @@
-import { join, basename, dirname } from "node:path";
+import { join, basename, dirname, resolve, sep } from "node:path";
 import { mkdir, access, writeFile, readFile, readdir, stat, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
@@ -393,6 +393,40 @@ export async function listHiveProjects(): Promise<string[]> {
   }
 }
 
+export const HIVE_CATEGORIES = [
+  "projects", "concepts", "clients", "company", "personal", "people",
+] as const;
+export type HiveCategory = typeof HIVE_CATEGORIES[number];
+
+/** Categories stored as flat `<category>/<name>.md` files (everything but projects). */
+export const FLAT_CATEGORIES = HIVE_CATEGORIES.filter((c) => c !== "projects");
+
+export async function listHivePages(category: HiveCategory): Promise<string[]> {
+  try {
+    const entries = await readdir(join(HIVE_DIR, category), { withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile() && e.name.endsWith(".md"))
+      .map((e) => e.name.slice(0, -3))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Collapse the run of blank lines around `at` down to a single blank line.
+ * Removing a block leaves the blank that preceded it adjacent to the blank that
+ * followed it; without this the index accumulates blank lines on every reset.
+ */
+function collapseBlankRun(lines: string[], at: number): string[] {
+  let start = at;
+  while (start > 0 && lines[start - 1].trim() === "") start--;
+  let end = at;
+  while (end < lines.length && lines[end].trim() === "") end++;
+  if (end > start) lines.splice(start, end - start, "");
+  return lines;
+}
+
 /**
  * Drop a project's `### <name>` block from the Projects section of index.md.
  * The block runs from its `### ` heading to the next heading of equal or
@@ -406,11 +440,67 @@ function stripProjectFromIndex(index: string, project: string): string {
   let end = start + 1;
   while (end < lines.length && !/^#{2,3} /.test(lines[end])) end++;
 
-  // Absorb the blank line the removed block left behind, if any.
-  if (lines[end - 1]?.trim() === "" && lines[start - 1]?.trim() === "") end--;
-
   lines.splice(start, end - start);
-  return lines.join("\n");
+  return tidyIndex(lines, start).join("\n");
+}
+
+/** Placeholders the scaffolded index uses for an empty section. */
+const EMPTY_SECTION: Record<string, string> = {
+  Projects: "(No projects yet)",
+  Concepts: "(No concepts yet)",
+  Clients: "(No clients yet)",
+  Company: "(No company knowledge yet)",
+  Personal: "(No personal knowledge yet)",
+  People: "(No people yet)",
+};
+
+/**
+ * Restore the `(No … yet)` placeholder if removing an entry emptied a section,
+ * so a reset-to-empty index matches what ensureHiveDir() would have scaffolded.
+ */
+function restoreEmptySection(lines: string[], at: number): boolean {
+  // After the splice, lines[at] may be the *next* section's heading (the removed
+  // entry was the last thing in its section). Step back so the scan finds the
+  // heading the entry belonged to, not the one that followed it.
+  let head = /^## /.test(lines[at] ?? "") ? at - 1 : at;
+  while (head >= 0 && !/^## /.test(lines[head] ?? "")) head--;
+  if (head < 0) return false;
+
+  const title = lines[head].replace(/^##\s+/, "").trim();
+  const placeholder = EMPTY_SECTION[title];
+  if (!placeholder) return false;
+
+  let end = head + 1;
+  while (end < lines.length && !/^## /.test(lines[end])) end++;
+  if (lines.slice(head + 1, end).some((l) => l.trim() !== "")) return false;
+
+  lines.splice(head + 1, end - (head + 1), "", placeholder, "");
+  return true;
+}
+
+/**
+ * Tidy the seam left by removing an entry at `at`. Restoring an emptied
+ * section must be tried first: collapsing shifts the array, which would push
+ * `at` into the following section and check the wrong one for emptiness.
+ */
+function tidyIndex(lines: string[], at: number): string[] {
+  if (restoreEmptySection(lines, at)) return lines;
+  return collapseBlankRun(lines, at);
+}
+
+/**
+ * Drop a flat page's bullet from index.md. Entries look like
+ * `- [Title](clients/name.md) — summary`, so match on the link target rather
+ * than the title, which is free-form and need not match the filename.
+ */
+function stripPageFromIndex(index: string, relPath: string): string {
+  const lines = index.split("\n");
+  const target = `(${relPath})`;
+  const at = lines.findIndex((l) => l.trimStart().startsWith("- ") && l.includes(target));
+  if (at === -1) return index;
+
+  lines.splice(at, 1);
+  return tidyIndex(lines, at).join("\n");
 }
 
 async function appendLogEntry(entry: string): Promise<void> {
@@ -424,11 +514,27 @@ async function appendLogEntry(entry: string): Promise<void> {
 }
 
 /**
+ * Resolve a project directory, refusing anything that escapes projects/.
+ * This is reachable from the local HTTP API, so a name like "../.." must not
+ * be able to turn a project reset into a wipe of the whole wiki (or worse).
+ */
+function resolveProjectDir(project: string): string {
+  const projectsRoot = resolve(HIVE_DIR, "projects");
+  const dir = resolve(projectsRoot, project);
+  if (dir !== projectsRoot && !dir.startsWith(projectsRoot + sep)) {
+    throw new Error(`invalid project name: ${project}`);
+  }
+  if (dir === projectsRoot) throw new Error("project name is required");
+  return dir;
+}
+
+/**
  * Remove one project's pages and its index entry. The log is append-only per
  * the wiki schema, so the reset is recorded rather than scrubbed from history.
  */
 export async function resetHiveProject(project: string, today: string): Promise<void> {
-  await rm(join(HIVE_DIR, "projects", project), { recursive: true, force: true });
+  const dir = resolveProjectDir(project);
+  await rm(dir, { recursive: true, force: true });
 
   const indexPath = join(HIVE_DIR, "index.md");
   try {
@@ -440,6 +546,41 @@ export async function resetHiveProject(project: string, today: string): Promise<
 
   await appendLogEntry(
     `## [${today}] reset | project | ${project}\nRemoved projects/${project}/ and its index entry.`,
+  );
+}
+
+/**
+ * Remove a single flat page (clients/people/concepts/company/personal) and its
+ * index bullet. Same containment guard as projects — this is HTTP-reachable.
+ */
+export async function resetHivePage(
+  category: HiveCategory,
+  name: string,
+  today: string,
+): Promise<void> {
+  if (!FLAT_CATEGORIES.includes(category as (typeof FLAT_CATEGORIES)[number])) {
+    throw new Error(`invalid category: ${category}`);
+  }
+
+  const categoryRoot = resolve(HIVE_DIR, category);
+  const file = resolve(categoryRoot, `${name}.md`);
+  if (!file.startsWith(categoryRoot + sep)) {
+    throw new Error(`invalid page name: ${name}`);
+  }
+
+  await rm(file, { force: true });
+
+  const relPath = `${category}/${name}.md`;
+  const indexPath = join(HIVE_DIR, "index.md");
+  try {
+    const index = await readFile(indexPath, "utf8");
+    await writeFile(indexPath, stripPageFromIndex(index, relPath));
+  } catch {
+    // No index yet — nothing to strip.
+  }
+
+  await appendLogEntry(
+    `## [${today}] reset | page | ${relPath}\nRemoved ${relPath} and its index entry.`,
   );
 }
 

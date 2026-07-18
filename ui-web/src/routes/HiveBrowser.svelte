@@ -27,15 +27,65 @@
   let pageLoading = $state(false);
   let pageError = $state<string | null>(null);
 
+  type ResetTarget =
+    | { kind: "all" }
+    | { kind: "project"; name: string }
+    | { kind: "page"; category: string; name: string };
+
+  let resetTarget = $state<ResetTarget | null>(null);
+  let resetConfirmText = $state("");
+  let resetting = $state(false);
+  let resetError = $state<string | null>(null);
+
+  async function refreshPages() {
+    const [p, idx] = await Promise.all([api.listWikiPages(), api.getHiveIndex()]);
+    wikiPages.set(p.pages);
+    indexContent = idx.content;
+  }
+
   onMount(async () => {
     try {
-      const [p, idx] = await Promise.all([api.listWikiPages(), api.getHiveIndex()]);
-      wikiPages.set(p.pages);
-      indexContent = idx.content;
+      await refreshPages();
     } finally {
       loading = false;
     }
   });
+
+  function askReset(target: ResetTarget) {
+    resetTarget = target;
+    resetConfirmText = "";
+    resetError = null;
+  }
+
+  /** Path of the page the reset would delete, for the redirect-away check. */
+  function deletedPath(t: ResetTarget): string | null {
+    if (t.kind === "project") return `projects/${t.name}/`;
+    if (t.kind === "page") return `${t.category}/${t.name}.md`;
+    return null;
+  }
+
+  async function performReset() {
+    if (!resetTarget) return;
+    const target = resetTarget;
+    resetting = true;
+    resetError = null;
+    try {
+      if (target.kind === "all") await api.resetHiveAll();
+      else if (target.kind === "project") await api.resetHiveProject(target.name);
+      else await api.resetHivePage(target.category, target.name);
+
+      await refreshPages();
+      // The open page may have just been deleted — fall back to the index.
+      const prefix = deletedPath(target);
+      const gone = target.kind === "all" || (prefix ? (path?.startsWith(prefix) ?? false) : false);
+      if (gone && path) navigate("/hive");
+      resetTarget = null;
+    } catch (e) {
+      resetError = String(e);
+    } finally {
+      resetting = false;
+    }
+  }
 
   $effect(() => {
     const current = path;
@@ -137,17 +187,27 @@
             </div>
             {#each Array.from(projectGroups.entries()).sort(([a], [b]) => a.localeCompare(b)) as [projectName, pages]}
               {@const expanded = (expandedProjects[projectName] ?? false) || search.trim().length > 0 || pages.some((p) => p.path === path)}
-              <button
-                class="nav-link w-full text-left"
-                onclick={() => toggleProject(projectName)}
-                aria-expanded={expanded}
-              >
-                <span class="w-3 text-center text-neutral-500 text-xs">
-                  {expanded ? "▾" : "▸"}
-                </span>
-                <span class="font-medium text-neutral-200 truncate">{projectName}</span>
-                <span class="ml-auto text-[10px] text-neutral-600 font-mono">{pages.length}</span>
-              </button>
+              <div class="group relative flex items-center">
+                <button
+                  class="nav-link flex-1 min-w-0 text-left"
+                  onclick={() => toggleProject(projectName)}
+                  aria-expanded={expanded}
+                >
+                  <span class="w-3 text-center text-neutral-500 text-xs">
+                    {expanded ? "▾" : "▸"}
+                  </span>
+                  <span class="font-medium text-neutral-200 truncate">{projectName}</span>
+                  <span
+                    class="ml-auto text-[10px] text-neutral-600 font-mono group-hover:invisible"
+                  >{pages.length}</span>
+                </button>
+                <button
+                  class="absolute right-2 px-1 text-xs text-neutral-500 opacity-0 transition hover:text-red-400 focus:opacity-100 group-hover:opacity-100"
+                  title="Reset {projectName}"
+                  aria-label="Reset project {projectName}"
+                  onclick={() => askReset({ kind: "project", name: projectName })}
+                >✕</button>
+              </div>
               {#if expanded}
                 <div class="ml-3 border-l border-neutral-800">
                   {#each pages.sort((a, b) => a.name.localeCompare(b.name)) as page}
@@ -173,12 +233,20 @@
                 {category}
               </div>
               {#each pages.sort((a, b) => a.name.localeCompare(b.name)) as page}
-                <button
-                  class="nav-link w-full text-left {page.path === path ? 'active' : ''}"
-                  onclick={() => navigate(`/hive/page/${page.path}`)}
-                >
-                  <span class="truncate">{pageLabel(page)}</span>
-                </button>
+                <div class="group relative flex items-center">
+                  <button
+                    class="nav-link flex-1 min-w-0 text-left {page.path === path ? 'active' : ''}"
+                    onclick={() => navigate(`/hive/page/${page.path}`)}
+                  >
+                    <span class="truncate">{pageLabel(page)}</span>
+                  </button>
+                  <button
+                    class="absolute right-2 px-1 text-xs text-neutral-500 opacity-0 transition hover:text-red-400 focus:opacity-100 group-hover:opacity-100"
+                    title="Reset {category}/{page.name}"
+                    aria-label="Reset page {category}/{page.name}"
+                    onclick={() => askReset({ kind: "page", category, name: page.name })}
+                  >✕</button>
+                </div>
               {/each}
             </div>
           {/if}
@@ -232,7 +300,82 @@
             <div class="text-sm text-neutral-500">No index available.</div>
           </div>
         {/if}
+
+        <div class="card mt-6 border-red-900/60">
+          <div class="text-xs uppercase tracking-wider text-red-400/80 mb-2">Danger zone</div>
+          <p class="text-sm text-neutral-400 mb-3">
+            Reset a single project from the sidebar (hover a project, click ✕). Resetting
+            everything deletes all projects, concepts, clients, company, personal and people
+            pages. This cannot be undone.
+          </p>
+          <button class="btn-secondary text-red-400 hover:text-red-300" onclick={() => askReset({ kind: "all" })}>
+            Reset entire wiki
+          </button>
+        </div>
       </div>
     {/if}
   </div>
 </div>
+
+{#if resetTarget}
+  {@const isAll = resetTarget.kind === "all"}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="reset-title"
+  >
+    <div class="card w-full max-w-md border-red-900">
+      <h2 id="reset-title" class="text-lg font-semibold mb-2">
+        {isAll ? "Reset the entire wiki?" : `Reset "${resetTarget.name}"?`}
+      </h2>
+
+      {#if isAll}
+        <p class="text-sm text-neutral-400 mb-3">
+          Every page in every category will be permanently deleted and the wiki rescaffolded
+          empty. Your code and files are not touched. This cannot be undone.
+        </p>
+        <p class="text-sm text-neutral-400 mb-2">
+          Type <span class="font-mono text-red-400">RESET</span> to confirm:
+        </p>
+        <input
+          class="input mb-3"
+          type="text"
+          bind:value={resetConfirmText}
+          placeholder="RESET"
+          aria-label="Type RESET to confirm"
+        />
+      {:else if resetTarget.kind === "project"}
+        <p class="text-sm text-neutral-400 mb-3">
+          Deletes the pages under <span class="font-mono">projects/{resetTarget.name}/</span> and
+          removes it from the index. Pages about this name in other categories (clients,
+          people, concepts) are kept. This cannot be undone.
+        </p>
+      {:else}
+        <p class="text-sm text-neutral-400 mb-3">
+          Deletes
+          <span class="font-mono">{resetTarget.category}/{resetTarget.name}.md</span>
+          and removes it from the index. Other pages that link to it are left as-is —
+          run a lint afterwards to clean up any dangling links. This cannot be undone.
+        </p>
+      {/if}
+
+      {#if resetError}
+        <div class="text-sm text-red-400 mb-3">{resetError}</div>
+      {/if}
+
+      <div class="flex justify-end gap-2">
+        <button class="btn-secondary" onclick={() => (resetTarget = null)} disabled={resetting}>
+          Cancel
+        </button>
+        <button
+          class="btn-secondary text-red-400 hover:text-red-300"
+          onclick={performReset}
+          disabled={resetting || (isAll && resetConfirmText !== "RESET")}
+        >
+          {resetting ? "Resetting..." : isAll ? "Reset everything" : resetTarget.kind === "project" ? "Reset project" : "Reset page"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}

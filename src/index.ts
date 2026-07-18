@@ -46,8 +46,12 @@ import {
   getHiveDir,
   buildProjectContext,
   listHiveProjects,
+  listHivePages,
   resetHiveProject,
+  resetHivePage,
   resetHiveAll,
+  FLAT_CATEGORIES,
+  type HiveCategory,
 } from "./hive.js";
 
 function confirm(prompt: string): Promise<boolean> {
@@ -245,7 +249,7 @@ program
   .option("--log [n]", "Print the last n log entries (default: 10)")
   .option("--open", "Open the wiki directory in the system file manager")
   .option("--obsidian", "Open the wiki in Obsidian (requires Obsidian 1.0+)")
-  .option("--reset [project]", "Delete a project's knowledge, or the entire wiki if no project is given")
+  .option("--reset [target]", "Delete a project, a <category>/<page>, or the entire wiki if no target is given")
   .option("-y, --yes", "Skip the confirmation prompt (use with --reset)")
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
@@ -254,9 +258,40 @@ program
   }) => {
     try {
       if (opts.reset !== undefined) {
-        const project = typeof opts.reset === "string" ? opts.reset : null;
+        const raw = typeof opts.reset === "string" ? opts.reset.replace(/\/+$/, "") : null;
+        const today = new Date().toISOString().slice(0, 10);
 
-        if (project) {
+        // Bare name = project (back-compat); "<category>/<name>" = a single page.
+        const slash = raw?.indexOf("/") ?? -1;
+        const category = raw && slash > 0 ? raw.slice(0, slash) : null;
+        const pageName = raw && slash > 0 ? raw.slice(slash + 1).replace(/\.md$/, "") : null;
+
+        let describe: string;
+        let doReset: () => Promise<void>;
+        let doneMsg: string;
+
+        if (!raw) {
+          describe = "the ENTIRE hive wiki (all projects, concepts, clients, company, personal, people)";
+          doReset = resetHiveAll;
+          doneMsg = "Reset the entire hive wiki";
+        } else if (category && category !== "projects") {
+          if (!FLAT_CATEGORIES.includes(category as (typeof FLAT_CATEGORIES)[number])) {
+            console.log(chalk.red(`  Unknown category "${category}".`));
+            console.log(chalk.dim(`  Valid categories: ${FLAT_CATEGORIES.join(", ")}`));
+            process.exit(1);
+          }
+          const cat = category as HiveCategory;
+          const pages = await listHivePages(cat);
+          if (!pages.includes(pageName!)) {
+            console.log(chalk.red(`  No page "${pageName}" in ${category}.`));
+            if (pages.length > 0) console.log(chalk.dim(`  Known: ${pages.join(", ")}`));
+            process.exit(1);
+          }
+          describe = `the page ${category}/${pageName}.md`;
+          doReset = () => resetHivePage(cat, pageName!, today);
+          doneMsg = `Reset ${category}/${pageName}`;
+        } else {
+          const project = category === "projects" ? pageName! : raw;
           const projects = await listHiveProjects();
           if (!projects.includes(project)) {
             console.log(chalk.red(`  No hive knowledge for project "${project}".`));
@@ -265,13 +300,13 @@ program
             }
             process.exit(1);
           }
+          describe = `all hive knowledge for "${project}"`;
+          doReset = () => resetHiveProject(project, today);
+          doneMsg = `Reset hive knowledge for "${project}"`;
         }
 
-        const target = project
-          ? `all hive knowledge for "${project}"`
-          : `the ENTIRE hive wiki (all projects, concepts, clients, company, personal, people)`;
-        console.log(chalk.yellow(`  This will permanently delete ${target}.`));
-        if (!project) {
+        console.log(chalk.yellow(`  This will permanently delete ${describe}.`));
+        if (!raw) {
           console.log(chalk.dim(`  ${getHiveDir()} will be wiped and rescaffolded empty.`));
         }
 
@@ -283,13 +318,8 @@ program
           }
         }
 
-        if (project) {
-          await resetHiveProject(project, new Date().toISOString().slice(0, 10));
-          console.log(chalk.green(`  ✓ Reset hive knowledge for "${project}"`));
-        } else {
-          await resetHiveAll();
-          console.log(chalk.green("  ✓ Reset the entire hive wiki"));
-        }
+        await doReset();
+        console.log(chalk.green(`  ✓ ${doneMsg}`));
         return;
       }
 

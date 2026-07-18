@@ -158,9 +158,11 @@ clauth hive --open            # open the wiki directory in your file manager
 clauth hive --obsidian        # open the wiki in Obsidian (requires Obsidian 1.0+)
 
 # Reset knowledge (destructive, prompts for confirmation)
-clauth hive --reset clauth    # drop one project's pages + its index entry
-clauth hive --reset           # wipe the entire wiki and rescaffold it empty
-clauth hive --reset -y        # skip the confirmation prompt
+clauth hive --reset clauth              # drop one project's pages + its index entry
+clauth hive --reset clients/mmi         # drop a single client page
+clauth hive --reset people/muge-gunduz  # drop a single person page
+clauth hive --reset                     # wipe the entire wiki and rescaffold it empty
+clauth hive --reset -y                  # skip the confirmation prompt
 ```
 
 ## Hive Mind

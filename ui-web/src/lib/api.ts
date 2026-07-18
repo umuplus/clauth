@@ -90,6 +90,23 @@ export const api = {
   getWikiPage: (path: string) =>
     request<WikiPageContent>(`/api/hive/page/${path}`),
 
+  // Hive reset (destructive)
+  listHiveProjects: () => request<{ projects: string[] }>("/api/hive/projects"),
+  resetHiveProject: (name: string) =>
+    request<{ reset: string }>(`/api/hive/projects/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  resetHivePage: (category: string, name: string) =>
+    request<{ reset: string }>(
+      `/api/hive/pages/${encodeURIComponent(category)}/${encodeURIComponent(name)}`,
+      { method: "DELETE" }
+    ),
+  resetHiveAll: () =>
+    request<{ reset: string }>("/api/hive", {
+      method: "DELETE",
+      body: JSON.stringify({ confirm: "RESET" }),
+    }),
+
   // Hive operations (LLM, SSE-streamed)
   feedHive: (prompt: string, onProgress?: (ev: HiveStreamEvent) => void) =>
     streamHive(
