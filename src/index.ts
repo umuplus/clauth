@@ -45,7 +45,20 @@ import {
   getProjectName,
   getHiveDir,
   buildProjectContext,
+  listHiveProjects,
+  resetHiveProject,
+  resetHiveAll,
 } from "./hive.js";
+
+function confirm(prompt: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(chalk.yellow(prompt), (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y");
+    });
+  });
+}
 
 function getObsidianConfigPath(): string | null {
   const p = platform();
@@ -232,11 +245,54 @@ program
   .option("--log [n]", "Print the last n log entries (default: 10)")
   .option("--open", "Open the wiki directory in the system file manager")
   .option("--obsidian", "Open the wiki in Obsidian (requires Obsidian 1.0+)")
+  .option("--reset [project]", "Delete a project's knowledge, or the entire wiki if no project is given")
+  .option("-y, --yes", "Skip the confirmation prompt (use with --reset)")
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
     index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
+    reset?: string | boolean; yes?: boolean;
   }) => {
     try {
+      if (opts.reset !== undefined) {
+        const project = typeof opts.reset === "string" ? opts.reset : null;
+
+        if (project) {
+          const projects = await listHiveProjects();
+          if (!projects.includes(project)) {
+            console.log(chalk.red(`  No hive knowledge for project "${project}".`));
+            if (projects.length > 0) {
+              console.log(chalk.dim(`  Known projects: ${projects.join(", ")}`));
+            }
+            process.exit(1);
+          }
+        }
+
+        const target = project
+          ? `all hive knowledge for "${project}"`
+          : `the ENTIRE hive wiki (all projects, concepts, clients, company, personal, people)`;
+        console.log(chalk.yellow(`  This will permanently delete ${target}.`));
+        if (!project) {
+          console.log(chalk.dim(`  ${getHiveDir()} will be wiped and rescaffolded empty.`));
+        }
+
+        if (!opts.yes) {
+          const confirmed = await confirm(`  Continue? (y/N) `);
+          if (!confirmed) {
+            console.log(chalk.dim("  Cancelled."));
+            return;
+          }
+        }
+
+        if (project) {
+          await resetHiveProject(project, new Date().toISOString().slice(0, 10));
+          console.log(chalk.green(`  ✓ Reset hive knowledge for "${project}"`));
+        } else {
+          await resetHiveAll();
+          console.log(chalk.green("  ✓ Reset the entire hive wiki"));
+        }
+        return;
+      }
+
       // --- Phase 10: local browse commands (no LLM needed) ---
       if (opts.index) {
         try {

@@ -156,6 +156,11 @@ clauth hive --log             # print the last 10 log entries
 clauth hive --log 30          # print the last 30 entries
 clauth hive --open            # open the wiki directory in your file manager
 clauth hive --obsidian        # open the wiki in Obsidian (requires Obsidian 1.0+)
+
+# Reset knowledge (destructive, prompts for confirmation)
+clauth hive --reset clauth    # drop one project's pages + its index entry
+clauth hive --reset           # wipe the entire wiki and rescaffold it empty
+clauth hive --reset -y        # skip the confirmation prompt
 ```
 
 ## Hive Mind

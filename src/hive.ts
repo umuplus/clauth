@@ -1,5 +1,5 @@
 import { join, basename, dirname } from "node:path";
-import { mkdir, access, writeFile, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, access, writeFile, readFile, readdir, stat, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
 
@@ -380,6 +380,73 @@ export async function detectNewSessionLog(
 
 export function getProjectName(): string {
   return basename(process.cwd());
+}
+
+// --- reset ---
+
+export async function listHiveProjects(): Promise<string[]> {
+  try {
+    const entries = await readdir(join(HIVE_DIR, "projects"), { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Drop a project's `### <name>` block from the Projects section of index.md.
+ * The block runs from its `### ` heading to the next heading of equal or
+ * higher level (`### ` or `## `), matching the index format in CLAUDE.md.
+ */
+function stripProjectFromIndex(index: string, project: string): string {
+  const lines = index.split("\n");
+  const start = lines.findIndex((l) => l.trim() === `### ${project}`);
+  if (start === -1) return index;
+
+  let end = start + 1;
+  while (end < lines.length && !/^#{2,3} /.test(lines[end])) end++;
+
+  // Absorb the blank line the removed block left behind, if any.
+  if (lines[end - 1]?.trim() === "" && lines[start - 1]?.trim() === "") end--;
+
+  lines.splice(start, end - start);
+  return lines.join("\n");
+}
+
+async function appendLogEntry(entry: string): Promise<void> {
+  const logPath = join(HIVE_DIR, "log.md");
+  try {
+    const current = await readFile(logPath, "utf8");
+    await writeFile(logPath, `${current.replace(/\n*$/, "")}\n\n${entry}\n`);
+  } catch {
+    await writeFile(logPath, `${LOG_CONTENT.replace(/\n*$/, "")}\n\n${entry}\n`);
+  }
+}
+
+/**
+ * Remove one project's pages and its index entry. The log is append-only per
+ * the wiki schema, so the reset is recorded rather than scrubbed from history.
+ */
+export async function resetHiveProject(project: string, today: string): Promise<void> {
+  await rm(join(HIVE_DIR, "projects", project), { recursive: true, force: true });
+
+  const indexPath = join(HIVE_DIR, "index.md");
+  try {
+    const index = await readFile(indexPath, "utf8");
+    await writeFile(indexPath, stripProjectFromIndex(index, project));
+  } catch {
+    // No index yet — nothing to strip.
+  }
+
+  await appendLogEntry(
+    `## [${today}] reset | project | ${project}\nRemoved projects/${project}/ and its index entry.`,
+  );
+}
+
+/** Delete the entire wiki and rescaffold an empty one. */
+export async function resetHiveAll(): Promise<void> {
+  await rm(HIVE_DIR, { recursive: true, force: true });
+  await ensureHiveDir();
 }
 
 // --- hive operations ---
