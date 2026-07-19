@@ -34,6 +34,27 @@ export interface HiveResult {
   error: string | null;
 }
 
+export interface HiveBackfillResult extends HiveResult {
+  /** Pages whose prose changed — backfill should only touch frontmatter, so any entry is a fault. */
+  bodiesChanged: string[];
+  backupDir: string;
+}
+
+export interface QueueItem {
+  logPath: string;
+  project: string;
+  profile: string;
+  enqueuedAt: string;
+  attempts: number;
+  lastError?: string;
+}
+
+export interface QueueState {
+  pending: QueueItem[];
+  failed: QueueItem[];
+  lastProcessed: { project: string; at: string; summary: string | null } | null;
+}
+
 export type HiveStreamEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; detail?: string }

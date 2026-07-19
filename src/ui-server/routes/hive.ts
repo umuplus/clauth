@@ -9,6 +9,7 @@ import {
   runHiveQuery,
   runHiveLint,
   runHiveFileIngest,
+  runHiveBackfillSummaries,
   listHiveProjects,
   listHivePages,
   resetHiveProject,
@@ -19,6 +20,7 @@ import {
   type HiveStreamEvent,
   type HiveAnalysisResult,
 } from "../../hive.js";
+import { readQueue, retryFailed, clearFailed } from "../../hive-queue.js";
 import {
   getClaudeConfigDir,
   getFolderProfile,
@@ -129,6 +131,20 @@ hiveRoutes.get("/page/:path{.+}", async (c) => {
   } catch {
     return c.json({ error: "page not found" }, 404);
   }
+});
+
+// --- analysis queue ---
+
+hiveRoutes.get("/queue", async (c) => {
+  return c.json(await readQueue());
+});
+
+hiveRoutes.post("/queue/retry-failed", async (c) => {
+  return c.json({ requeued: await retryFailed() });
+});
+
+hiveRoutes.post("/queue/clear-failed", async (c) => {
+  return c.json({ dropped: await clearFailed() });
 });
 
 // --- reset endpoints (destructive, no LLM) ---
@@ -257,6 +273,18 @@ hiveRoutes.post("/query", async (c) => {
 
   return streamRun(c, (onEvent) =>
     runHiveQuery(prompt, profile.dir, profile.name, onEvent)
+  );
+});
+
+hiveRoutes.post("/backfill-summaries", async (c) => {
+  const profile = await resolveProfile();
+  if (!profile) {
+    return c.json({ error: "no profile found" }, 400);
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return streamRun(c, (onEvent) =>
+    runHiveBackfillSummaries(profile.dir, profile.name, stamp, onEvent)
   );
 });
 

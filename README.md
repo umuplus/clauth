@@ -163,6 +163,17 @@ clauth hive --reset clients/mmi         # drop a single client page
 clauth hive --reset people/muge-gunduz  # drop a single person page
 clauth hive --reset                     # wipe the entire wiki and rescaffold it empty
 clauth hive --reset -y                  # skip the confirmation prompt
+
+# Session analysis queue
+clauth hive --queue                     # what is waiting, what failed, what ran last
+clauth hive --catchup                   # analyse queued sessions now
+clauth hive --sessions 20               # list recent sessions and pick ones to add
+clauth hive --queue --retry-failed      # requeue sessions that gave up
+clauth hive --queue --clear-failed      # drop them
+
+# Maintenance
+clauth hive --backfill-summaries        # fill in the summary field on every page
+clauth hive --usage                     # are sessions actually opening wiki pages?
 ```
 
 ## Hive Mind
@@ -177,7 +188,23 @@ The wiki is a folder of markdown files at `~/.clauth/hive/` — open it in Obsid
 clauth config <profile> --hive-mind
 ```
 
-When enabled, after every Claude session ends under that profile, clauth spawns a headless analysis session that reads the session log and upserts extracted knowledge into the wiki. Runs synchronously with a brief summary.
+When enabled, clauth asks at the end of each session whether to add it to the wiki:
+
+```
+  Add this session to hive? [Y/n]
+```
+
+Enter queues it; the analysis then runs **in the background** and the terminal returns immediately. Declining is safe — the session log stays on disk, so `clauth hive --sessions` can list recent sessions and add any you skipped by mistake.
+
+Control the prompt per profile:
+
+```bash
+clauth config work --analyze ask      # prompt each time (default)
+clauth config work --analyze always   # queue everything, never prompt
+clauth config work --analyze never    # never queue
+```
+
+Queued work survives interruption: if the background worker is killed, the session stays in the queue and is picked up next time. A session that fails repeatedly is set aside after 3 attempts rather than retried forever. Pending and failed counts appear in the launch banner and in the web UI dashboard.
 
 ### Two feed paths
 
@@ -200,9 +227,21 @@ The wiki organizes knowledge across six categories:
 
 Pages use YAML frontmatter and relative markdown links. Obsidian-compatible out of the box.
 
-### Context injection
+### Context injection — a map, not a dump
 
-When you launch a session in a project that already has wiki pages, clauth injects the accumulated knowledge into Claude's system prompt. The session starts already knowing your prior decisions and context — no need to re-explain.
+When you launch a session in a project that has wiki pages, clauth injects a **knowledge map** into Claude's system prompt: one line per page saying what kind of knowledge it holds, plus the client and people pages your project links to, plus every other project as a single line.
+
+Page contents are **not** injected. The session starts knowing where things are, not what they say — it opens the pages it needs with Read or Grep, and ignores the rest.
+
+This keeps the cost of a session flat as the wiki grows. On a 9-page project, the old approach injected ~18,000 tokens of prior context into every session before you typed anything; the map is ~500 and capped, no matter how large the wiki gets.
+
+The map is built from each page's `summary` frontmatter field — deterministically, in code, with no LLM call. If you have pages from before that field existed, fill them in once:
+
+```bash
+clauth hive --backfill-summaries
+```
+
+That copies the wiki to `~/.clauth/hive-backups/` first, and verifies afterwards that only frontmatter changed.
 
 ### The schema
 
@@ -238,7 +277,7 @@ Profiles are stored under `~/.clauth/`. Each profile gets its own directory that
 When you launch a profile, clauth:
 1. Records it as the last-used profile for the current directory (`~/.clauth/folders.json`)
 2. Sets `CLAUDE_CONFIG_DIR` to the profile's directory (except for `default`)
-3. If Hive Mind is enabled, injects accumulated project knowledge via `--append-system-prompt`
+3. If Hive Mind is enabled, injects the knowledge map (not page contents) via `--append-system-prompt`
 4. Spawns `claude` with any configured flags and passthrough arguments
 5. After the session exits, if Hive Mind is enabled, runs a headless analysis session that upserts new knowledge into the wiki
 

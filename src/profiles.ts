@@ -21,7 +21,7 @@ export function getClaudeConfigDir(name: string): string {
   return join(CLAUTH_DIR, name);
 }
 
-export const RESERVED_NAMES = ["default", "hive"];
+export const RESERVED_NAMES = ["default", "hive", "hive-backups"];
 
 export function isValidName(name: string): boolean {
   return /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name);
@@ -35,7 +35,12 @@ export async function ensureClauthDir(): Promise<void> {
   await mkdir(CLAUTH_DIR, { recursive: true });
 }
 
-const NON_PROFILE_DIRS = ["hive"];
+/**
+ * clauth's own directories under ~/.clauth. Everything else there is a profile,
+ * so anything added here must also be reserved — otherwise it shows up in the
+ * profile selector as a phantom account.
+ */
+const NON_PROFILE_DIRS = ["hive", "hive-backups"];
 
 export async function getProfileNames(): Promise<string[]> {
   await ensureClauthDir();
@@ -103,6 +108,8 @@ export interface ProfileConfig {
   skipPermissions?: boolean;
   hiveMind?: {
     enabled: boolean;
+    /** What to do with a finished session: ask (default), always queue, or never. */
+    analyze?: "ask" | "always" | "never";
   };
 }
 

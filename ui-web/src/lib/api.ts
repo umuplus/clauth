@@ -4,7 +4,9 @@ import type {
   WikiPageContent,
   LogEntry,
   HiveResult,
+  HiveBackfillResult,
   HiveStreamEvent,
+  QueueState,
   StatsCache,
 } from "./types";
 
@@ -47,28 +49,28 @@ async function* parseSSE(
   }
 }
 
-async function streamHive(
+async function streamHive<T extends HiveResult = HiveResult>(
   path: string,
   init: RequestInit,
   onProgress?: (ev: HiveStreamEvent) => void
-): Promise<HiveResult> {
+): Promise<T> {
   const res = await fetch(path, init);
   if (!res.ok || !res.body) {
     const text = res.body ? await res.text() : "";
     throw new Error(`${res.status} ${text}`);
   }
   const reader = res.body.getReader();
-  let result: HiveResult | null = null;
+  let result: T | null = null;
   for await (const evt of parseSSE(reader)) {
     if (evt.event === "progress" && onProgress) {
       try { onProgress(JSON.parse(evt.data) as HiveStreamEvent); } catch { /* ignore */ }
     } else if (evt.event === "done") {
-      try { result = JSON.parse(evt.data) as HiveResult; } catch { /* ignore */ }
+      try { result = JSON.parse(evt.data) as T; } catch { /* ignore */ }
     } else if (evt.event === "error") {
-      result = { summary: null, error: evt.data || "stream error" };
+      result = { summary: null, error: evt.data || "stream error" } as T;
     }
   }
-  return result ?? { summary: null, error: "stream ended without result" };
+  return result ?? ({ summary: null, error: "stream ended without result" } as T);
 }
 
 export const api = {
@@ -89,6 +91,13 @@ export const api = {
   listWikiPages: () => request<{ pages: WikiPage[] }>("/api/hive/pages"),
   getWikiPage: (path: string) =>
     request<WikiPageContent>(`/api/hive/page/${path}`),
+
+  // Analysis queue
+  getHiveQueue: () => request<QueueState>("/api/hive/queue"),
+  retryFailedQueue: () =>
+    request<{ requeued: number }>("/api/hive/queue/retry-failed", { method: "POST" }),
+  clearFailedQueue: () =>
+    request<{ dropped: number }>("/api/hive/queue/clear-failed", { method: "POST" }),
 
   // Hive reset (destructive)
   listHiveProjects: () => request<{ projects: string[] }>("/api/hive/projects"),
@@ -130,6 +139,12 @@ export const api = {
     ),
   lintHive: (onProgress?: (ev: HiveStreamEvent) => void) =>
     streamHive("/api/hive/lint", { method: "POST" }, onProgress),
+  backfillSummaries: (onProgress?: (ev: HiveStreamEvent) => void) =>
+    streamHive<HiveBackfillResult>(
+      "/api/hive/backfill-summaries",
+      { method: "POST" },
+      onProgress
+    ),
   uploadFile: (
     file: File,
     focus?: string,

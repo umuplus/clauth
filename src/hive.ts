@@ -1,5 +1,5 @@
 import { join, basename, dirname, resolve, sep } from "node:path";
-import { mkdir, access, writeFile, readFile, readdir, stat, rm } from "node:fs/promises";
+import { mkdir, access, writeFile, readFile, readdir, stat, rm, cp, open } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
 
@@ -24,18 +24,100 @@ async function writeIfMissing(path: string, content: string): Promise<void> {
   }
 }
 
-export async function ensureHiveDir(): Promise<void> {
+/**
+ * Bump whenever SCHEMA_CONTENT changes in a way the analyzer must follow.
+ * Wikis created before versioning existed are treated as v1.
+ *
+ * 2 — `summary` frontmatter field; the injected context became a map built from it.
+ * 3 — cross-linking promoted from a convention to a numbered ingest step, after
+ *     measurement showed backlinks were written in only one direction.
+ */
+const SCHEMA_VERSION = 3;
+
+export interface SchemaUpgrade {
+  from: number;
+  to: number;
+  backupPath: string;
+}
+
+const BACKUP_DIR = join(getClauthDir(), "hive-backups");
+const BACKUPS_KEPT = 3;
+
+/** Names this code creates. Anything else in the directory is left alone. */
+const WIKI_SNAPSHOT = /^\d{4}-\d{2}-\d{2}T[\d-]+Z$/;
+const SCHEMA_SNAPSHOT = /^CLAUDE\.md\.v\d+-\d{4}-\d{2}-\d{2}T[\d-]+Z$/;
+
+/**
+ * Keep the most recent `keep` backups of each kind and delete the rest.
+ * Timestamped names sort lexicographically, so sorting is enough — no stat calls.
+ * Only files this code wrote are eligible; anything a user put here is untouched.
+ */
+export async function pruneBackups(keep = BACKUPS_KEPT): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(BACKUP_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const wiki = entries.filter((e) => e.isDirectory() && WIKI_SNAPSHOT.test(e.name)).map((e) => e.name);
+  const schema = entries.filter((e) => e.isFile() && SCHEMA_SNAPSHOT.test(e.name)).map((e) => e.name);
+
+  const stale = [...wiki.sort().slice(0, -keep), ...schema.sort().slice(0, -keep)];
+  for (const name of stale) {
+    await rm(join(BACKUP_DIR, name), { recursive: true, force: true });
+  }
+  return stale;
+}
+
+function readSchemaVersion(content: string): number {
+  const m = content.match(/<!--\s*clauth-schema-version:\s*(\d+)\s*-->/);
+  return m ? parseInt(m[1], 10) : 1;
+}
+
+/**
+ * Upgrade the wiki's CLAUDE.md when clauth ships a newer schema.
+ *
+ * Without this the file is written once and never touched again, so an existing
+ * wiki keeps an old rulebook forever — the analyzer goes on following rules that
+ * no longer match what the rest of clauth expects. The previous file is kept
+ * rather than overwritten, since it is the one file a user may have hand-edited.
+ */
+async function upgradeSchema(stamp: string): Promise<SchemaUpgrade | null> {
+  const schemaPath = join(HIVE_DIR, "CLAUDE.md");
+  const current = await readPage(schemaPath);
+
+  if (current === null) {
+    await writeFile(schemaPath, SCHEMA_CONTENT);
+    return null;
+  }
+
+  const from = readSchemaVersion(current);
+  if (from >= SCHEMA_VERSION) return null;
+
+  const backupPath = join(BACKUP_DIR, `CLAUDE.md.v${from}-${stamp}`);
+  await mkdir(BACKUP_DIR, { recursive: true });
+  await writeFile(backupPath, current);
+  await writeFile(schemaPath, SCHEMA_CONTENT);
+  await pruneBackups();
+
+  return { from, to: SCHEMA_VERSION, backupPath };
+}
+
+export async function ensureHiveDir(): Promise<SchemaUpgrade | null> {
   await mkdir(HIVE_DIR, { recursive: true });
   for (const dir of ["projects", "concepts", "clients", "company", "personal", "people"]) {
     await mkdir(join(HIVE_DIR, dir), { recursive: true });
   }
 
-  await writeIfMissing(join(HIVE_DIR, "CLAUDE.md"), SCHEMA_CONTENT);
   await writeIfMissing(join(HIVE_DIR, "index.md"), INDEX_CONTENT);
   await writeIfMissing(join(HIVE_DIR, "log.md"), LOG_CONTENT);
+
+  return upgradeSchema(new Date().toISOString().replace(/[:.]/g, "-"));
 }
 
-const SCHEMA_CONTENT = `# Hive Mind Wiki — Schema
+const SCHEMA_CONTENT = `<!-- clauth-schema-version: 3 -->
+# Hive Mind Wiki — Schema
 
 You are maintaining a personal knowledge wiki. This file governs how you read, write, and maintain every page in this wiki. Follow these conventions exactly.
 
@@ -102,6 +184,7 @@ Every wiki page (except index.md and log.md) uses this structure:
 title: Page Title
 category: project | concept | client | company | personal | people
 project: project-name    # only for project category pages
+summary: One line, under 100 characters — a pointer, not a summary
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 tags: [tag1, tag2]
@@ -117,12 +200,27 @@ Content organized under clear headings. Use concise prose.
 \`\`\`
 
 Rules:
-- Always include YAML frontmatter with at least \`title\`, \`category\`, \`created\`, \`updated\`
+- Always include YAML frontmatter with at least \`title\`, \`category\`, \`summary\`, \`created\`, \`updated\`
 - Update the \`updated\` date whenever you modify a page
 - Use relative links between wiki pages (e.g., \`../concepts/graphql.md\`)
 - Keep pages focused — one topic per page. Split when a page grows beyond ~200 lines
 - Use headings (##, ###) to structure content. Keep nesting shallow
 - Add bidirectional links when entities relate across categories
+
+### The \`summary\` field — hard rules
+
+\`summary\` is not decoration. It is the only thing about this page that future
+sessions see by default: clauth builds a compact knowledge map from these fields
+and injects that map instead of the page bodies. Everything else is read on demand.
+
+- **Under 100 characters. This is a hard cap, not a guideline.** Longer summaries
+  are truncated when the map is built, so an overlong one loses its tail.
+- **Write a pointer, not an answer.** \`Auth decisions and their rationale\` is
+  correct. \`Uses JWT with 24h expiry\` is wrong — it invites the reader to act on
+  a partial fact instead of opening the page, and it goes stale silently.
+- Name what *kind* of knowledge lives here, so a reader can tell whether it is
+  relevant to the task in front of them.
+- Update it when the page's scope changes — not on every content edit.
 
 ## Operations
 
@@ -147,9 +245,20 @@ When processing a session JSONL log:
    - If a relevant page exists, update it with new information. Merge, don't duplicate.
    - If the information doesn't fit any existing page, create a new one.
    - When new information contradicts existing content, update the page and note what changed and when.
-6. **Update index.md** — add entries for any new pages. Update summaries for modified pages.
-7. **Append to log.md** — record what you did.
-8. **Print a summary** — as your final output, print a single line in this exact format:
+6. **Cross-link both ways** — this is a required step, not a convention to apply if convenient.
+   For every client, person or concept named in what you just extracted:
+   - Open that entity's page (create it if it doesn't exist).
+   - Make sure it links to this project.
+   - **Then go back and edit the project page so it links to the entity.** This second
+     edit is the one that gets forgotten: you have already finished writing the project
+     page by this point, and re-opening it feels redundant. Do it anyway. A link that
+     exists in only one direction is invisible from the other side — clauth builds each
+     session's knowledge map by following these links, so a missing backlink means the
+     entity never reaches the session that needed it.
+   - Verify before finishing: for each entity you touched, both pages name the other.
+7. **Update index.md** — add entries for any new pages. Update summaries for modified pages.
+8. **Append to log.md** — record what you did.
+9. **Print a summary** — as your final output, print a single line in this exact format:
    \`HIVE_SUMMARY: <short description of what was extracted and updated>\`
    Example: \`HIVE_SUMMARY: extracted 2 decisions, 1 architecture update; created projects/clauth/problems.md; updated index\`
    This line is parsed by clauth to display a brief status to the user. Keep it under 120 characters.
@@ -832,6 +941,319 @@ export function runHiveLint(
   return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
 }
 
+// --- session listing (for the picker) ---
+
+export interface SessionSummary {
+  logPath: string;
+  project: string;
+  profile: string;
+  modifiedAt: Date;
+  slug: string | null;
+  firstPrompt: string | null;
+}
+
+/** Only the head of a log is read — session files reach megabytes, and the label lives at the top. */
+const SESSION_HEAD_BYTES = 200_000;
+
+/**
+ * A human label for a session: Claude Code's own slug when present, plus the
+ * first real user message. Harness noise (`[Request interrupted…]`, tool
+ * results, slash commands) is skipped — those are never what the session was about.
+ */
+async function describeSession(logPath: string): Promise<{ slug: string | null; firstPrompt: string | null }> {
+  let head: string;
+  try {
+    const handle = await open(logPath, "r");
+    const buf = Buffer.alloc(SESSION_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, SESSION_HEAD_BYTES, 0);
+    await handle.close();
+    head = buf.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return { slug: null, firstPrompt: null };
+  }
+
+  let slug: string | null = null;
+  let firstPrompt: string | null = null;
+
+  for (const line of head.split("\n")) {
+    if (!line.trim()) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue; // truncated final line of the head slice
+    }
+
+    if (!slug && typeof d.slug === "string") slug = d.slug;
+    if (firstPrompt || d.type !== "user" || d.isMeta) continue;
+
+    const content = d?.message?.content;
+    const texts: string[] =
+      typeof content === "string"
+        ? [content]
+        : Array.isArray(content)
+          ? content.filter((b: any) => b?.type === "text").map((b: any) => String(b.text ?? ""))
+          : [];
+
+    for (const raw of texts) {
+      const text = raw.trim();
+      if (!text || text.startsWith("[") || text.startsWith("<") || text.startsWith("/")) continue;
+      firstPrompt = text.replace(/\s+/g, " ").slice(0, 70);
+      break;
+    }
+  }
+
+  return { slug, firstPrompt };
+}
+
+/** Most recent sessions across the given profiles, newest first. */
+export async function listRecentSessions(
+  profiles: { name: string; configDir: string }[],
+  limit: number
+): Promise<SessionSummary[]> {
+  const found: { logPath: string; profile: string; mtime: number }[] = [];
+
+  for (const profile of profiles) {
+    for (const [logPath, mtime] of await snapshotSessionFiles(profile.configDir)) {
+      found.push({ logPath, profile: profile.name, mtime });
+    }
+  }
+
+  found.sort((a, b) => b.mtime - a.mtime);
+
+  const out: SessionSummary[] = [];
+  for (const entry of found.slice(0, limit)) {
+    const { slug, firstPrompt } = await describeSession(entry.logPath);
+    // The per-project directory name is the encoded cwd; its last segment is the project.
+    const project = basename(dirname(entry.logPath)).split("-").filter(Boolean).pop() ?? "?";
+    out.push({
+      logPath: entry.logPath,
+      project,
+      profile: entry.profile,
+      modifiedAt: new Date(entry.mtime),
+      slug,
+      firstPrompt,
+    });
+  }
+  return out;
+}
+
+// --- usage measurement ---
+
+export interface HiveUsage {
+  /** Sessions in a project that has wiki pages — i.e. a map was almost certainly injected. */
+  sessionsWithMap: number;
+  /** Of those, how many opened at least one wiki page. */
+  sessionsThatRead: number;
+  /** Page path → how many distinct sessions opened it. */
+  pageHits: Record<string, number>;
+  /** Pages that exist but were never opened in the scanned window. */
+  neverRead: string[];
+  scannedSessions: number;
+  since: string | null;
+}
+
+/**
+ * Does a tool call touch the wiki? Read/Edit expose a path directly; Grep and
+ * Glob may scope by path; Bash can reach it inside an arbitrary command, so that
+ * one is matched on the command text — undercounting it would bias the result
+ * toward "the map is ignored", which is the conclusion we most want to avoid
+ * reaching by accident.
+ */
+function hivePathsInToolUse(name: string, input: Record<string, unknown>): string[] {
+  const candidates: string[] = [];
+  for (const key of ["file_path", "path", "notebook_path"]) {
+    const v = input[key];
+    if (typeof v === "string") candidates.push(v);
+  }
+  if (name === "Bash" && typeof input.command === "string") {
+    for (const m of input.command.matchAll(/[^\s"']*\.clauth\/hive\/[^\s"';|&]*/g)) {
+      candidates.push(m[0]);
+    }
+  }
+  return candidates.filter((p) => p.includes(`${sep}.clauth${sep}hive${sep}`) || p.includes("/.clauth/hive/"));
+}
+
+/** Normalise an absolute wiki path to a wiki-relative page path. */
+function toWikiRelative(p: string): string | null {
+  const idx = p.indexOf(".clauth/hive/");
+  if (idx === -1) return null;
+  const rel = p.slice(idx + ".clauth/hive/".length).replace(/[)"',;]+$/, "");
+  return rel.endsWith(".md") ? rel : null;
+}
+
+async function scanSessionLog(
+  filePath: string
+): Promise<{ project: string | null; pages: Set<string>; touchedHive: boolean; lastTs: string | null } | null> {
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  let project: string | null = null;
+  let lastTs: string | null = null;
+  let touchedHive = false;
+  const pages = new Set<string>();
+
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (!project && typeof d.cwd === "string") project = basename(d.cwd);
+    if (typeof d.timestamp === "string") lastTs = d.timestamp;
+
+    const blocks = d?.message?.content;
+    if (!Array.isArray(blocks)) continue;
+    for (const b of blocks) {
+      if (b?.type !== "tool_use" || typeof b.name !== "string") continue;
+      for (const p of hivePathsInToolUse(b.name, b.input ?? {})) {
+        touchedHive = true;
+        const rel = toWikiRelative(p);
+        if (rel) pages.add(rel);
+      }
+    }
+  }
+
+  return { project, pages, touchedHive, lastTs };
+}
+
+/**
+ * Measure whether injected maps are actually followed.
+ *
+ * The denominator is approximate on purpose: a session counts as "had a map" if
+ * its project has wiki pages *now*, since logs do not record the injected system
+ * prompt. That misattributes sessions from before a project's pages existed, which
+ * is acceptable while the question is "is this zero or not" rather than a precise rate.
+ */
+export async function computeHiveUsage(claudeConfigDirs: string[]): Promise<HiveUsage> {
+  const projectsWithPages = new Set(await listHiveProjects());
+  const realFiles = new Set([
+    ...(await listAllPages()),
+    "CLAUDE.md", "index.md", "log.md",
+  ]);
+  const pageHits: Record<string, number> = {};
+  let sessionsWithMap = 0;
+  let sessionsThatRead = 0;
+  let scannedSessions = 0;
+  let since: string | null = null;
+
+  for (const configDir of claudeConfigDirs) {
+    for (const filePath of (await snapshotSessionFiles(configDir)).keys()) {
+      const scan = await scanSessionLog(filePath);
+      if (!scan) continue;
+      scannedSessions++;
+      if (scan.lastTs && (!since || scan.lastTs < since)) since = scan.lastTs;
+
+      if (!scan.project || !projectsWithPages.has(scan.project)) continue;
+      sessionsWithMap++;
+      if (scan.touchedHive) sessionsThatRead++;
+      for (const page of scan.pages) {
+        if (realFiles.has(page)) pageHits[page] = (pageHits[page] ?? 0) + 1;
+      }
+    }
+  }
+
+  const allPages = await listAllPages();
+  const neverRead = allPages.filter((p) => !pageHits[p]).sort();
+
+  return { sessionsWithMap, sessionsThatRead, pageHits, neverRead, scannedSessions, since };
+}
+
+// --- summary backfill ---
+
+export interface HiveBackfillResult extends HiveAnalysisResult {
+  /** Pages whose prose changed. Backfill must only touch frontmatter, so any entry here is a fault. */
+  bodiesChanged: string[];
+  backupDir: string;
+}
+
+/** Every content page — the three top-level wiki files are not pages. */
+async function listAllPages(): Promise<string[]> {
+  const out: string[] = [];
+  for (const category of HIVE_CATEGORIES) {
+    const root = join(HIVE_DIR, category);
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        out.push(`${category}/${entry.name}`);
+      } else if (entry.isDirectory()) {
+        try {
+          for (const file of await readdir(join(root, entry.name))) {
+            if (file.endsWith(".md")) out.push(`${category}/${entry.name}/${file}`);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+  return out.sort();
+}
+
+const stripFrontmatter = (s: string) => s.replace(/^---[\s\S]*?\n---\n?/, "").trim();
+
+async function snapshotBodies(): Promise<Record<string, string>> {
+  const snap: Record<string, string> = {};
+  for (const rel of await listAllPages()) {
+    const content = await readPage(join(HIVE_DIR, rel));
+    if (content !== null) snap[rel] = stripFrontmatter(content);
+  }
+  return snap;
+}
+
+/**
+ * Fill in the `summary` frontmatter field across the wiki.
+ *
+ * The wiki is not version-controlled, so this copies it aside first and then
+ * verifies that only frontmatter changed — an LLM editing 26 pages of
+ * unversioned knowledge is otherwise an unbounded, unrecoverable edit.
+ */
+export async function runHiveBackfillSummaries(
+  claudeConfigDir: string,
+  profileName: string,
+  stamp: string,
+  onEvent?: HiveOnEvent
+): Promise<HiveBackfillResult> {
+  const backupDir = join(BACKUP_DIR, stamp);
+  await mkdir(BACKUP_DIR, { recursive: true });
+  await cp(HIVE_DIR, backupDir, { recursive: true });
+  await pruneBackups();
+
+  const before = await snapshotBodies();
+
+  const prompt = [
+    `You are backfilling the \`summary\` frontmatter field across the knowledge wiki at ${HIVE_DIR}/.`,
+    `Read CLAUDE.md there first — the "summary field — hard rules" section governs this task.`,
+    `Process EVERY page under projects/, concepts/, clients/, company/, personal/ and people/.`,
+    `Do NOT touch CLAUDE.md, index.md or log.md.`,
+    `For each page: add a \`summary:\` line to its YAML frontmatter, or rewrite the existing one if it breaks the rules.`,
+    `STRICT CONSTRAINT: change nothing except the \`summary\` field. Do not edit page prose, headings, links, or any other frontmatter field. The prose is verified byte-for-byte afterwards and any change is reported as a fault.`,
+    `Each summary must be under 100 characters and must say what KIND of knowledge the page holds, not state a fact from it.`,
+    `Work through the pages systematically. When done, print a HIVE_SUMMARY line reporting how many pages you updated.`,
+  ].join(" ");
+
+  const result = await spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
+
+  const after = await snapshotBodies();
+  const bodiesChanged = Object.keys(before).filter(
+    (rel) => after[rel] === undefined || after[rel] !== before[rel]
+  );
+
+  return { ...result, bodiesChanged, backupDir };
+}
+
 export function runHiveFileIngest(
   filePath: string,
   focusPrompt: string | undefined,
@@ -854,35 +1276,172 @@ export function runHiveFileIngest(
 
 // --- cross-session context injection ---
 
-export async function buildProjectContext(projectName: string): Promise<string | null> {
-  const projectDir = join(HIVE_DIR, "projects", projectName);
+/**
+ * The map is injected into every session, so it must stay bounded no matter how
+ * large the wiki grows. Page bodies are never injected — the agent reads them on
+ * demand with Read/Grep, which is why these lines are pointers, not summaries.
+ */
+const SUMMARY_MAX = 100;
+const MAP_MAX_CHARS = 4000;
 
-  let files: string[];
+function firstProseLine(body: string): string | null {
+  for (const line of body.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#") || t.startsWith("---") || t.startsWith("|")) continue;
+    // Require whitespace after the bullet so `**Bold` is not mistaken for a list item.
+    return t.replace(/^[-*+]\s+/, "");
+  }
+  return null;
+}
+
+/** Strip inline markdown so a pointer line reads as plain text. */
+function plainText(s: string): string {
+  return s
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*([^*]*)\*\*/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * A page's map line. Prefers the `summary` frontmatter field; pages written
+ * before that field existed fall back to their first prose line, then the title,
+ * so the map degrades gracefully instead of going blank during migration.
+ */
+function pageSummary(content: string): string {
+  const fm = content.startsWith("---") ? content.slice(3, content.indexOf("\n---", 3)) : "";
+  const field = (name: string): string | null => {
+    const m = fm.match(new RegExp(`^${name}:\\s*(.+)$`, "m"));
+    return m ? m[1].trim().replace(/^["']|["']$/g, "") : null;
+  };
+
+  const body = content.replace(/^---[\s\S]*?\n---\n?/, "");
+  const flat = plainText(field("summary") ?? firstProseLine(body) ?? field("title") ?? "");
+  if (flat.length <= SUMMARY_MAX) return flat;
+
+  // Cut at a word boundary and drop dangling punctuation, so a truncated
+  // fallback doesn't read as a sentence that was going somewhere.
+  const cut = flat.slice(0, SUMMARY_MAX - 1);
+  const at = cut.lastIndexOf(" ");
+  return `${(at > SUMMARY_MAX / 2 ? cut.slice(0, at) : cut).replace(/[\s,;:—-]+$/, "")}…`;
+}
+
+/** Wiki-relative targets of markdown links, e.g. `../clients/mmi.md` → `clients/mmi.md`. */
+function linkedEntities(content: string): string[] {
+  const out: string[] = [];
+  for (const m of content.matchAll(/\]\(([^)]+\.md)\)/g)) {
+    const target = m[1].replace(/^(\.\.\/)+/, "").replace(/^\.\//, "");
+    const category = target.split("/")[0];
+    if (FLAT_CATEGORIES.includes(category as (typeof FLAT_CATEGORIES)[number])) out.push(target);
+  }
+  return out;
+}
+
+/** Does this page link into the given project? Matches any page or anchor within it. */
+function linksToProject(content: string, projectName: string): boolean {
+  for (const m of content.matchAll(/\]\(([^)]+)\)/g)) {
+    const target = m[1].replace(/^(\.\.\/)+/, "").replace(/^\.\//, "");
+    if (target.startsWith(`projects/${projectName}/`)) return true;
+  }
+  return false;
+}
+
+async function readPage(path: string): Promise<string | null> {
   try {
-    files = (await readdir(projectDir)).filter((f) => f.endsWith(".md"));
+    return await readFile(path, "utf8");
   } catch {
     return null;
   }
+}
 
-  if (files.length === 0) return null;
+/**
+ * Build the knowledge map injected at session start: the current project page by
+ * page, the client/people pages its own pages link to, and every other project as
+ * a single line. Derived from frontmatter rather than index.md — index.md is
+ * LLM-maintained prose and has no size guarantee, whereas this must fit a budget.
+ */
+export async function buildProjectContext(projectName: string): Promise<string | null> {
+  const projects = await listHiveProjects();
+  const projectDir = join(HIVE_DIR, "projects", projectName);
 
-  const sections: string[] = [];
-  for (const file of files) {
-    try {
-      const content = await readFile(join(projectDir, file), "utf8");
-      sections.push(content);
-    } catch {
-      continue;
+  let files: string[] = [];
+  try {
+    files = (await readdir(projectDir)).filter((f) => f.endsWith(".md")).sort();
+  } catch {
+    // Unknown project — the map is still useful for what else exists.
+  }
+
+  const lines: string[] = [];
+  const related = new Set<string>();
+
+  if (files.length > 0) {
+    lines.push(`## This project: ${projectName} (${files.length} pages)`);
+    for (const file of files) {
+      const content = await readPage(join(projectDir, file));
+      if (content === null) continue;
+      lines.push(`- projects/${projectName}/${file} — ${pageSummary(content)}`);
+      for (const target of linkedEntities(content)) related.add(target);
+    }
+    lines.push("");
+  }
+
+  // Also collect entities that link *to* this project. In practice the wiki's
+  // links run overwhelmingly in that direction — a client page names the
+  // projects it owns, while the project page rarely names the client — so
+  // reading only outward links misses nearly every relationship that exists.
+  for (const category of FLAT_CATEGORIES) {
+    for (const name of await listHivePages(category)) {
+      const rel = `${category}/${name}.md`;
+      if (related.has(rel)) continue;
+      const content = await readPage(join(HIVE_DIR, rel));
+      if (content === null) continue;
+      if (linksToProject(content, projectName)) related.add(rel);
     }
   }
 
-  if (sections.length === 0) return null;
+  if (related.size > 0) {
+    const entries: string[] = [];
+    for (const target of [...related].sort()) {
+      const content = await readPage(join(HIVE_DIR, target));
+      if (content === null) continue; // linked page was deleted; skip rather than point at nothing
+      entries.push(`- ${target} — ${pageSummary(content)}`);
+    }
+    if (entries.length > 0) {
+      lines.push("## Related people and clients", ...entries, "");
+    }
+  }
+
+  const others = projects.filter((p) => p !== projectName);
+  if (others.length > 0) {
+    lines.push("## Other projects");
+    for (const other of others) {
+      const content =
+        (await readPage(join(HIVE_DIR, "projects", other, "context.md"))) ??
+        (await readPage(join(HIVE_DIR, "projects", other, "architecture.md")));
+      const summary = content ? ` — ${pageSummary(content)}` : "";
+      lines.push(`- projects/${other}/${summary}`);
+    }
+    lines.push("");
+  }
+
+  if (lines.length === 0) return null;
+
+  let body = lines.join("\n").trimEnd();
+  if (body.length > MAP_MAX_CHARS) {
+    body = `${body.slice(0, MAP_MAX_CHARS)}\n… map truncated; list the wiki directory for the rest.`;
+  }
 
   return [
-    `# Hive Mind — Prior knowledge for project "${projectName}"`,
+    `# Hive Mind — knowledge map`,
     "",
-    "The following is accumulated knowledge from previous sessions and manual input, maintained in the Hive Mind wiki.",
+    `Accumulated knowledge from previous sessions lives at ${HIVE_DIR}/ as markdown files.`,
+    `The lines below are pointers, not summaries — they say what kind of knowledge each`,
+    `page holds, not what it says. Open the relevant page with Read (or Grep across the`,
+    `wiki) before relying on prior context or repeating a decision. Do not assume a page's`,
+    `contents from its pointer.`,
     "",
-    ...sections,
+    body,
   ].join("\n");
 }

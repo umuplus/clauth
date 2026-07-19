@@ -3,7 +3,12 @@
   import { api } from "../lib/api";
   import { renderMarkdown, parseFrontmatter } from "../lib/markdown";
   import { wikiPages, navigate } from "../lib/stores";
-  import type { Category, WikiPage, WikiPageContent } from "../lib/types";
+  import type {
+    Category,
+    WikiPage,
+    WikiPageContent,
+    HiveBackfillResult,
+  } from "../lib/types";
 
   let { path }: { path?: string } = $props();
 
@@ -36,6 +41,42 @@
   let resetConfirmText = $state("");
   let resetting = $state(false);
   let resetError = $state<string | null>(null);
+
+  let backfillConfirm = $state(false);
+  let backfilling = $state(false);
+  let backfillProgress = $state<string[]>([]);
+  let backfillResult = $state<HiveBackfillResult | null>(null);
+
+  async function runBackfill() {
+    backfillConfirm = false;
+    backfilling = true;
+    backfillProgress = [];
+    backfillResult = null;
+    try {
+      backfillResult = await api.backfillSummaries((ev) => {
+        const line =
+          ev.kind === "tool"
+            ? ev.detail
+              ? `→ ${ev.name} ${ev.detail}`
+              : `→ ${ev.name}`
+            : ev.kind === "system"
+              ? `· ${ev.message}`
+              : ev.text;
+        // Keep the tail only — a 26-page pass emits a lot of events.
+        backfillProgress = [...backfillProgress, line].slice(-40);
+      });
+      await refreshPages();
+    } catch (e) {
+      backfillResult = {
+        summary: null,
+        error: String(e),
+        bodiesChanged: [],
+        backupDir: "",
+      };
+    } finally {
+      backfilling = false;
+    }
+  }
 
   async function refreshPages() {
     const [p, idx] = await Promise.all([api.listWikiPages(), api.getHiveIndex()]);
@@ -300,6 +341,71 @@
             <div class="text-sm text-neutral-500">No index available.</div>
           </div>
         {/if}
+
+        <div class="card mt-6">
+          <div class="text-xs uppercase tracking-wider text-neutral-500 mb-2">Maintenance</div>
+          <p class="text-sm text-neutral-400 mb-3">
+            Backfill the <span class="font-mono">summary</span> field on every page. These
+            summaries are what future sessions see by default — page bodies are read on demand,
+            so a page without one is effectively invisible until opened.
+          </p>
+
+          {#if !backfilling && !backfillConfirm}
+            <button class="btn-secondary" onclick={() => (backfillConfirm = true)}>
+              Backfill summaries
+            </button>
+          {/if}
+
+          {#if backfillConfirm}
+            <div class="rounded border border-neutral-700 p-3 text-sm">
+              <p class="text-neutral-300 mb-1">This edits every page in the wiki.</p>
+              <p class="text-neutral-400 mb-3">
+                The wiki is copied to <span class="font-mono">~/.clauth/hive-backups/</span> first,
+                and page prose is verified afterwards — only frontmatter should change. Uses your
+                Claude quota and may take a few minutes.
+              </p>
+              <div class="flex gap-2">
+                <button class="btn-secondary" onclick={() => (backfillConfirm = false)}>Cancel</button>
+                <button class="btn-primary" onclick={runBackfill}>Run backfill</button>
+              </div>
+            </div>
+          {/if}
+
+          {#if backfilling}
+            <div class="text-sm text-neutral-400 mb-2">Running backfill…</div>
+          {/if}
+
+          {#if backfilling || backfillProgress.length > 0}
+            <pre class="mt-2 max-h-48 overflow-auto rounded bg-neutral-900 p-2 text-xs text-neutral-500 whitespace-pre-wrap">{backfillProgress.join("\n")}</pre>
+          {/if}
+
+          {#if backfillResult}
+            {#if backfillResult.error}
+              <div class="mt-3 text-sm text-red-400">{backfillResult.error}</div>
+            {:else}
+              <div class="mt-3 text-sm text-neutral-300">{backfillResult.summary ?? "Done."}</div>
+            {/if}
+
+            {#if backfillResult.bodiesChanged.length > 0}
+              <div class="mt-2 rounded border border-yellow-800 bg-yellow-950/30 p-3 text-sm">
+                <div class="text-yellow-400 mb-1">
+                  ⚠ {backfillResult.bodiesChanged.length} page(s) had prose modified, not just frontmatter
+                </div>
+                <ul class="font-mono text-xs text-yellow-500/90">
+                  {#each backfillResult.bodiesChanged as p}<li>{p}</li>{/each}
+                </ul>
+                <div class="mt-2 text-xs text-neutral-400">
+                  Restore from <span class="font-mono">{backfillResult.backupDir}</span>
+                </div>
+              </div>
+            {:else if !backfillResult.error}
+              <div class="mt-2 text-xs text-neutral-500">
+                Verified: only frontmatter changed. Backup at
+                <span class="font-mono">{backfillResult.backupDir}</span>
+              </div>
+            {/if}
+          {/if}
+        </div>
 
         <div class="card mt-6 border-red-900/60">
           <div class="text-xs uppercase tracking-wider text-red-400/80 mb-2">Danger zone</div>

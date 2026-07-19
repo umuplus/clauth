@@ -34,6 +34,20 @@ import { printLaunchBanner } from "./ui.js";
 import { showAllStats, showProfileStats } from "./stats.js";
 import { runSetup } from "./setup.js";
 import {
+  enqueue,
+  readQueue,
+  acquireLock,
+  releaseLock,
+  peek,
+  markDone,
+  markFailed,
+  markSkipped,
+  statusOf,
+  retryFailed,
+  clearFailed,
+  MAX_ATTEMPTS,
+} from "./hive-queue.js";
+import {
   ensureHiveDir,
   snapshotSessionFiles,
   detectNewSessionLog,
@@ -50,8 +64,12 @@ import {
   resetHiveProject,
   resetHivePage,
   resetHiveAll,
+  runHiveBackfillSummaries,
+  computeHiveUsage,
+  listRecentSessions,
   FLAT_CATEGORIES,
   type HiveCategory,
+  type SchemaUpgrade,
 } from "./hive.js";
 
 function confirm(prompt: string): Promise<boolean> {
@@ -62,6 +80,115 @@ function confirm(prompt: string): Promise<boolean> {
       resolve(answer.trim().toLowerCase() === "y");
     });
   });
+}
+
+function ask(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(chalk.yellow(prompt), (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+/**
+ * Enter means yes — the session just ended and the user wants to move on.
+ *
+ * Resolves to the default if stdin closes without an answer (EOF, disconnected
+ * terminal). Leaving the promise unsettled would drop the session silently,
+ * which is the exact failure the queue exists to prevent.
+ */
+function confirmDefaultYes(prompt: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve(value);
+    };
+
+    rl.question(chalk.yellow(prompt), (answer) => finish(!answer.trim().toLowerCase().startsWith("n")));
+    // Deferred: when input arrives and stdin closes in the same tick, `close`
+    // can fire before the answer callback. Yielding lets a real answer win.
+    rl.on("close", () => setImmediate(() => finish(true)));
+  });
+}
+
+/** Parse "1,3-5" into indices. Invalid pieces are ignored rather than aborting the pick. */
+function parseSelection(input: string, max: number): number[] {
+  const picked = new Set<number>();
+  for (const part of input.split(",")) {
+    const range = part.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const [from, to] = [parseInt(range[1], 10), parseInt(range[2], 10)].sort((a, b) => a - b);
+      for (let i = from; i <= to; i++) if (i >= 1 && i <= max) picked.add(i);
+      continue;
+    }
+    const single = parseInt(part.trim(), 10);
+    if (single >= 1 && single <= max) picked.add(single);
+  }
+  return [...picked].sort((a, b) => a - b);
+}
+
+/**
+ * Start the queue worker as a detached child so the terminal returns immediately.
+ * If it dies (sleep, closed terminal, crash) the item simply stays queued and is
+ * picked up by the next worker — the queue, not the process, is the source of truth.
+ */
+function spawnQueueWorker(): void {
+  const child = spawn(process.execPath, [process.argv[1], "hive", "--catchup", "--quiet"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
+/** Process queued sessions one at a time. Returns how many succeeded. */
+async function processQueue(quiet: boolean): Promise<number> {
+  if (!(await acquireLock())) {
+    if (!quiet) console.log(chalk.dim("  hive: another analysis is already running."));
+    return 0;
+  }
+
+  let done = 0;
+  try {
+    for (let item = await peek(); item; item = await peek()) {
+      if (!quiet) console.log(chalk.dim(`  hive: analyzing ${item.project}...`));
+      try {
+        const result = await runHiveAnalysis(
+          item.logPath,
+          item.project,
+          getClaudeConfigDir(item.profile),
+          item.profile,
+          quiet
+            ? undefined
+            : (ev) => {
+                if (ev.kind === "tool") {
+                  console.log(chalk.dim(ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`));
+                }
+              }
+        );
+
+        if (result.error) {
+          await markFailed(item.logPath, result.error);
+          if (!quiet) console.log(chalk.red(`  hive: failed — ${result.error}`));
+        } else {
+          await markDone(item.logPath, result.summary, item.project);
+          done++;
+          if (!quiet) console.log(chalk.dim(`  hive: ${result.summary ?? "done"}`));
+        }
+      } catch (err) {
+        await markFailed(item.logPath, String(err));
+        if (!quiet) console.log(chalk.red(`  hive: failed — ${err}`));
+      }
+    }
+  } finally {
+    await releaseLock();
+  }
+  return done;
 }
 
 function getObsidianConfigPath(): string | null {
@@ -107,10 +234,12 @@ program
     }
 
     if (isReservedName(name)) {
-      const reason =
-        name.toLowerCase() === "hive"
-          ? "It's reserved for the Hive Mind knowledge wiki."
-          : "It's auto-created as a link to your existing Claude config.";
+      const reasons: Record<string, string> = {
+        hive: "It's reserved for the Hive Mind knowledge wiki.",
+        "hive-backups": "It's where clauth keeps wiki backups.",
+        default: "It's auto-created as a link to your existing Claude config.",
+      };
+      const reason = reasons[name.toLowerCase()] ?? "It's reserved by clauth.";
       console.log(chalk.red(`  "${name}" is a reserved profile name. ${reason}`));
       process.exit(1);
     }
@@ -170,7 +299,8 @@ program
   .option("--no-skip-permissions", "Require --dangerously-skip-permissions via --")
   .option("--hive-mind", "Enable hive mind for this profile")
   .option("--no-hive-mind", "Disable hive mind for this profile")
-  .action(async (name: string, opts: { skipPermissions?: boolean; hiveMind?: boolean }) => {
+  .option("--analyze <mode>", "What to do with a finished session: ask | always | never")
+  .action(async (name: string, opts: { skipPermissions?: boolean; hiveMind?: boolean; analyze?: string }) => {
     if (name.toLowerCase() === "hive") {
       console.log(chalk.red(`  "hive" is not a profile. It's the Hive Mind knowledge wiki.`));
       return;
@@ -181,7 +311,14 @@ program
       return;
     }
 
-    const noFlags = opts.skipPermissions === undefined && opts.hiveMind === undefined;
+    const ANALYZE_MODES = ["ask", "always", "never"] as const;
+    if (opts.analyze !== undefined && !ANALYZE_MODES.includes(opts.analyze as (typeof ANALYZE_MODES)[number])) {
+      console.log(chalk.red(`  Invalid --analyze "${opts.analyze}". Use: ${ANALYZE_MODES.join(", ")}`));
+      process.exit(1);
+    }
+
+    const noFlags =
+      opts.skipPermissions === undefined && opts.hiveMind === undefined && opts.analyze === undefined;
 
     if (noFlags) {
       // No flags provided — show current config
@@ -201,6 +338,14 @@ program
             : chalk.dim("off")
         }`
       );
+      if (config.hiveMind?.enabled) {
+        const mode = config.hiveMind.analyze ?? "ask";
+        const hint =
+          mode === "ask" ? "prompt after each session"
+          : mode === "always" ? "queue every session"
+          : "never queue";
+        console.log(`  analyze           ${chalk.cyan(mode)} ${chalk.dim(`— ${hint}`)}`);
+      }
       console.log();
       return;
     }
@@ -211,10 +356,23 @@ program
       console.log(`  ✓ skip-permissions ${label} for "${name}"`);
     }
 
-    if (opts.hiveMind !== undefined) {
-      await setConfig(name, { hiveMind: { enabled: opts.hiveMind } });
-      const label = opts.hiveMind ? chalk.green("on") : chalk.dim("off");
-      console.log(`  ✓ hive-mind ${label} for "${name}"`);
+    // setConfig merges shallowly, so hiveMind must be rebuilt from the existing
+    // object — otherwise toggling one field silently drops the other.
+    if (opts.hiveMind !== undefined || opts.analyze !== undefined) {
+      const current = (await getConfig(name)).hiveMind;
+      const hiveMind = {
+        enabled: opts.hiveMind ?? current?.enabled ?? false,
+        ...(current?.analyze ? { analyze: current.analyze } : {}),
+        ...(opts.analyze ? { analyze: opts.analyze as "ask" | "always" | "never" } : {}),
+      };
+      await setConfig(name, { hiveMind });
+
+      if (opts.hiveMind !== undefined) {
+        console.log(`  ✓ hive-mind ${opts.hiveMind ? chalk.green("on") : chalk.dim("off")} for "${name}"`);
+      }
+      if (opts.analyze !== undefined) {
+        console.log(`  ✓ analyze ${chalk.cyan(opts.analyze)} for "${name}"`);
+      }
     }
   });
 
@@ -250,11 +408,20 @@ program
   .option("--open", "Open the wiki directory in the system file manager")
   .option("--obsidian", "Open the wiki in Obsidian (requires Obsidian 1.0+)")
   .option("--reset [target]", "Delete a project, a <category>/<page>, or the entire wiki if no target is given")
+  .option("--backfill-summaries", "Fill in the summary frontmatter field across every wiki page")
+  .option("--usage", "Show whether sessions actually open the wiki pages they are pointed at")
+  .option("--queue", "Show sessions waiting to be analysed")
+  .option("--catchup", "Analyse queued sessions now")
+  .option("--sessions [n]", "List recent sessions and pick ones to analyse (default 20)")
+  .option("--retry-failed", "Requeue sessions that gave up (use with --queue)")
+  .option("--clear-failed", "Drop sessions that gave up (use with --queue)")
+  .option("--quiet", "Suppress output (used by the background worker)")
   .option("-y, --yes", "Skip the confirmation prompt (use with --reset)")
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
     index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
-    reset?: string | boolean; yes?: boolean;
+    reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; usage?: boolean;
+    queue?: boolean; catchup?: boolean; sessions?: string | boolean; retryFailed?: boolean; clearFailed?: boolean; quiet?: boolean;
   }) => {
     try {
       if (opts.reset !== undefined) {
@@ -396,6 +563,197 @@ program
         return;
       }
 
+      if (opts.sessions !== undefined) {
+        const limit = typeof opts.sessions === "string" ? (parseInt(opts.sessions, 10) || 20) : 20;
+
+        const withHive: { name: string; configDir: string }[] = [];
+        for (const p of await getProfilesWithStatus()) {
+          const cfg = await getConfig(p.name);
+          if (cfg.hiveMind?.enabled) withHive.push({ name: p.name, configDir: getClaudeConfigDir(p.name) });
+        }
+        if (withHive.length === 0) {
+          console.log(chalk.dim("  No profile has hive mind enabled."));
+          return;
+        }
+
+        const sessions = await listRecentSessions(withHive, limit);
+        if (sessions.length === 0) {
+          console.log(chalk.dim("  No sessions found."));
+          return;
+        }
+
+        const state = await readQueue();
+        // Pad the plain text before colouring — ANSI codes break padEnd's width maths.
+        const pad = (s: string) => s.padEnd(9);
+        const marks: Record<string, string> = {
+          done: chalk.green(pad("✓ added")),
+          skipped: chalk.dim(pad("· skipped")),
+          pending: chalk.yellow(pad("… queued")),
+          failed: chalk.red(pad("✗ failed")),
+          new: chalk.dim(pad("–")),
+        };
+
+        console.log(chalk.bold(`\n  Last ${sessions.length} sessions\n`));
+        const statuses: string[] = [];
+        for (const [i, s] of sessions.entries()) {
+          const status = await statusOf(state, s.logPath);
+          statuses.push(status);
+          const when = s.modifiedAt.toISOString().replace("T", " ").slice(5, 16);
+          const label = s.firstPrompt ?? s.slug ?? chalk.dim("(no prompt found)");
+          console.log(
+            `  ${String(i + 1).padStart(2)}. ${marks[status]}  ${chalk.dim(when)}  ` +
+            `${chalk.cyan(s.project.padEnd(14))} ${label}`
+          );
+        }
+
+        const addable = sessions.filter((_, i) => statuses[i] !== "pending");
+        if (addable.length === 0) {
+          console.log(chalk.dim("\n  Everything here is already queued.\n"));
+          return;
+        }
+
+        console.log(chalk.dim("\n  Pick sessions to add (e.g. 1,3-5) — blank to cancel."));
+        const answer = await ask("  > ");
+        const picked = parseSelection(answer, sessions.length);
+        if (picked.length === 0) {
+          console.log(chalk.dim("  Cancelled.\n"));
+          return;
+        }
+
+        let added = 0;
+        for (const n of picked) {
+          const s = sessions[n - 1];
+          if (statuses[n - 1] === "pending") continue;
+          await enqueue({ logPath: s.logPath, project: s.project, profile: s.profile });
+          added++;
+        }
+
+        console.log(chalk.green(`\n  ✓ Queued ${added} session(s)`));
+        if (added > 0) {
+          spawnQueueWorker();
+          console.log(chalk.dim("  Analysing in the background — check: clauth hive --queue\n"));
+        }
+        return;
+      }
+
+      if (opts.catchup) {
+        const n = await processQueue(!!opts.quiet);
+        if (!opts.quiet && n === 0) {
+          const { pending } = await readQueue();
+          if (pending.length === 0) console.log(chalk.dim("  hive: nothing queued."));
+        }
+        return;
+      }
+
+      if (opts.queue) {
+        const state = await readQueue();
+
+        if (opts.retryFailed) {
+          const n = await retryFailed();
+          console.log(chalk.green(`  ✓ Requeued ${n} failed session(s)`));
+          return;
+        }
+        if (opts.clearFailed) {
+          const n = await clearFailed();
+          console.log(chalk.green(`  ✓ Dropped ${n} failed session(s)`));
+          return;
+        }
+
+        console.log(chalk.bold("\n  Hive queue\n"));
+
+        if (state.lastProcessed) {
+          const when = state.lastProcessed.at.replace("T", " ").slice(0, 16);
+          console.log(chalk.dim(`  Last analysed: ${state.lastProcessed.project} at ${when}`));
+          if (state.lastProcessed.summary) {
+            console.log(chalk.dim(`  ${state.lastProcessed.summary}`));
+          }
+          console.log();
+        }
+
+        if (state.pending.length === 0 && state.failed.length === 0) {
+          console.log(chalk.green("  Up to date — nothing waiting.\n"));
+          return;
+        }
+
+        if (state.pending.length > 0) {
+          console.log(`  Pending (${state.pending.length})`);
+          state.pending.forEach((p) =>
+            console.log(
+              chalk.dim(`    ${p.project.padEnd(18)} queued ${p.enqueuedAt.replace("T", " ").slice(0, 16)}` +
+                (p.attempts > 0 ? `  (${p.attempts} failed attempt${p.attempts > 1 ? "s" : ""})` : ""))
+            )
+          );
+          console.log(chalk.dim("\n  Run: clauth hive --catchup\n"));
+        }
+
+        if (state.failed.length > 0) {
+          console.log(chalk.yellow(`  Failed (${state.failed.length}) — gave up after ${MAX_ATTEMPTS} attempts`));
+          state.failed.forEach((p) => {
+            console.log(chalk.dim(`    ${p.project}`));
+            if (p.lastError) console.log(chalk.dim(`      ${p.lastError.split("\n")[0].slice(0, 100)}`));
+          });
+          console.log(chalk.dim("\n  Retry: clauth hive --queue --retry-failed"));
+          console.log(chalk.dim("  Drop:  clauth hive --queue --clear-failed\n"));
+        }
+        return;
+      }
+
+      if (opts.usage) {
+        // Only profiles with hive mind on ever get a map injected.
+        const profiles = await getProfilesWithStatus();
+        const enabled: string[] = [];
+        for (const p of profiles) {
+          const cfg = await getConfig(p.name);
+          if (cfg.hiveMind?.enabled) enabled.push(p.name);
+        }
+
+        if (enabled.length === 0) {
+          console.log(chalk.dim("  No profile has hive mind enabled — nothing to measure."));
+          console.log(chalk.dim("  Enable it with: clauth config <name> --hive-mind"));
+          return;
+        }
+
+        const usage = await computeHiveUsage(enabled.map((n) => getClaudeConfigDir(n)));
+
+        console.log(chalk.bold("\n  Hive usage\n"));
+        console.log(chalk.dim(`  Profiles: ${enabled.join(", ")}`));
+        console.log(chalk.dim(`  Sessions scanned: ${usage.scannedSessions}${usage.since ? ` (since ${usage.since.slice(0, 10)})` : ""}`));
+
+        if (usage.sessionsWithMap === 0) {
+          console.log(chalk.dim("\n  No sessions yet in a project that has wiki pages."));
+          console.log(chalk.dim("  Run a few sessions with hive mind on, then check again.\n"));
+          return;
+        }
+
+        const pct = Math.round((usage.sessionsThatRead / usage.sessionsWithMap) * 100);
+        const colour = pct === 0 ? chalk.red : pct < 30 ? chalk.yellow : chalk.green;
+        console.log(
+          `\n  Sessions given a map:  ${usage.sessionsWithMap}` +
+          `\n  ...that opened a page: ${colour(`${usage.sessionsThatRead} (${pct}%)`)}\n`
+        );
+
+        const ranked = Object.entries(usage.pageHits).sort(([, a], [, b]) => b - a);
+        if (ranked.length > 0) {
+          console.log(chalk.bold("  Most-opened pages"));
+          ranked.slice(0, 10).forEach(([p, n]) => console.log(`    ${String(n).padStart(3)}  ${p}`));
+          console.log();
+        }
+
+        if (usage.neverRead.length > 0) {
+          console.log(chalk.bold(`  Never opened (${usage.neverRead.length})`));
+          usage.neverRead.slice(0, 10).forEach((p) => console.log(chalk.dim(`         ${p}`)));
+          if (usage.neverRead.length > 10) {
+            console.log(chalk.dim(`         … and ${usage.neverRead.length - 10} more`));
+          }
+          console.log();
+        }
+
+        console.log(chalk.dim("  Note: a session counts as \"given a map\" if its project has wiki"));
+        console.log(chalk.dim("  pages now, so sessions from before those pages existed inflate the"));
+        console.log(chalk.dim("  denominator. Treat low percentages as a signal, not a measurement.\n"));
+        return;
+      }
+
       // --- LLM-powered operations (need a profile for auth) ---
       const folder = await getFolderProfile();
       const profileName = folder ?? (await getLastUsed());
@@ -405,6 +763,33 @@ program
       }
 
       const claudeDir = getClaudeConfigDir(profileName);
+
+      if (opts.backfillSummaries) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        console.log(chalk.dim("  hive: backing up wiki and backfilling summaries..."));
+        const res = await runHiveBackfillSummaries(claudeDir, profileName, stamp, (ev) => {
+          if (ev.kind === "tool") {
+            console.log(chalk.dim(ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`));
+          }
+        });
+
+        if (res.error) {
+          console.log(chalk.red("  hive: backfill failed"));
+          console.log(chalk.red(res.error));
+        } else {
+          console.log(chalk.dim(`  hive: ${res.summary ?? "done"}`));
+        }
+
+        if (res.bodiesChanged.length > 0) {
+          console.log(chalk.yellow(`\n  ⚠ ${res.bodiesChanged.length} page(s) had prose modified, not just frontmatter:`));
+          res.bodiesChanged.forEach((p) => console.log(chalk.yellow(`    ${p}`)));
+          console.log(chalk.dim(`  Restore from: ${res.backupDir}`));
+        } else {
+          console.log(chalk.dim("  Verified: only frontmatter changed."));
+          console.log(chalk.dim(`  Backup: ${res.backupDir}`));
+        }
+        return;
+      }
 
       let result;
       if (opts.lint) {
@@ -506,6 +891,12 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   }
   if (config.hiveMind?.enabled) {
     flags.push("hive-mind");
+
+    // Surface a backlog where the user is already looking. Silent when there is
+    // nothing waiting — a status line that always shows becomes invisible.
+    const { pending, failed } = await readQueue();
+    if (pending.length > 0) flags.push(`${pending.length} queued`);
+    if (failed.length > 0) flags.push(`${failed.length} failed`);
   }
 
   await setLastUsed(name);
@@ -552,24 +943,28 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
       try {
         const logPath = await detectNewSessionLog(claudeDir, sessionSnapshot);
         if (logPath) {
-          console.log(chalk.dim("\n  hive: analyzing session..."));
-          const result = await runHiveAnalysis(logPath, getProjectName(), claudeDir, name, (ev) => {
-            if (ev.kind === "tool") {
-              const line = ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`;
-              console.log(chalk.dim(line));
-            }
-          });
-          if (result.summary) {
-            console.log(chalk.dim(`  hive: ${result.summary}`));
-          } else if (result.error) {
-            console.log(chalk.red("  hive: analysis failed"));
-            console.log(chalk.red(result.error));
+          // Queue, don't analyse. Running it here blocked the terminal for
+          // minutes after every session, so it got interrupted — and an
+          // interrupted analysis lost that session's knowledge for good.
+          const project = getProjectName();
+          const mode = config.hiveMind?.analyze ?? "ask";
+
+          // Only ask when there is someone to answer; piped or scripted runs
+          // would otherwise hang forever on a prompt nobody sees.
+          const canAsk = mode === "ask" && process.stdin.isTTY && process.stdout.isTTY;
+          const wanted = mode === "always" || (canAsk ? await confirmDefaultYes("\n  Add this session to hive? [Y/n] ") : mode !== "never");
+
+          if (wanted) {
+            await enqueue({ logPath, project, profile: name });
+            spawnQueueWorker();
+            console.log(chalk.dim("  hive: queued — analysing in the background"));
           } else {
-            console.log(chalk.dim("  hive: analysis complete (no summary returned)"));
+            await markSkipped(logPath, project);
+            console.log(chalk.dim("  hive: skipped (recover later with: clauth hive --sessions)"));
           }
         }
       } catch (err) {
-        console.log(chalk.red(`  hive: unexpected error — ${err}`));
+        console.log(chalk.red(`  hive: could not queue session — ${err}`));
       }
     }
     process.exit(code ?? 0);
@@ -597,15 +992,25 @@ async function interactiveSelect(): Promise<void> {
 
 // --- entry point ---
 
+function reportSchemaUpgrade(upgrade: SchemaUpgrade | null): void {
+  if (!upgrade) return;
+  console.log(
+    chalk.dim(`  hive: schema upgraded v${upgrade.from} → v${upgrade.to} (previous kept at ${upgrade.backupPath})`)
+  );
+}
+
 if (argv.length <= 2) {
   // No subcommand → always show interactive selector
   (async () => {
     await ensureDefaultProfile();
-    await ensureHiveDir();
+    reportSchemaUpgrade(await ensureHiveDir());
     await interactiveSelect();
   })();
 } else {
   ensureDefaultProfile()
     .then(() => ensureHiveDir())
-    .then(() => program.parse(argv));
+    .then((upgrade) => {
+      reportSchemaUpgrade(upgrade);
+      program.parse(argv);
+    });
 }

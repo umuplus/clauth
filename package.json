@@ -1,6 +1,6 @@
 {
   "name": "@cloudomium/clauth",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Manage multiple Claude CLI account profiles",
   "files": [
     "dist"
