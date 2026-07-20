@@ -501,26 +501,6 @@ export async function detectNewSessionLog(
   return (created ?? modified)?.path ?? null;
 }
 
-/**
- * The project a session actually belongs to, read from the log's own `cwd`.
- * Taking it from the launching process instead lets the label drift away from
- * the content whenever detection and the shell disagree.
- */
-export async function readSessionProject(logPath: string): Promise<string | null> {
-  const head = await readHead(logPath);
-  if (head === null) return null;
-
-  for (const line of head.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const d = JSON.parse(line);
-      if (typeof d.cwd === "string" && d.cwd) return basename(d.cwd);
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
 
 // --- project name ---
 
