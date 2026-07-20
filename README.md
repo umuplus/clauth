@@ -167,7 +167,7 @@ clauth hive --reset -y                  # skip the confirmation prompt
 # Session analysis queue
 clauth hive --queue                     # what is waiting, what failed, what ran last
 clauth hive --catchup                   # analyse queued sessions now
-clauth hive --sessions 20               # list recent sessions and pick ones to add
+clauth hive --sessions 20               # pick from this project's recent sessions to add
 clauth hive --queue --retry-failed      # requeue sessions that gave up
 clauth hive --queue --clear-failed      # drop them
 
@@ -194,7 +194,7 @@ When enabled, clauth asks at the end of each session whether to add it to the wi
   Add this session to hive? [Y/n]
 ```
 
-Enter queues it; the analysis then runs **in the background** and the terminal returns immediately. Declining is safe — the session log stays on disk, so `clauth hive --sessions` can list recent sessions and add any you skipped by mistake.
+Enter queues it; the analysis then runs **in the background** and the terminal returns immediately. Declining is safe — the session log stays on disk, so `clauth hive --sessions` (scoped to the current project) can list recent sessions and add any you skipped by mistake.
 
 Control the prompt per profile:
 
@@ -279,7 +279,7 @@ When you launch a profile, clauth:
 2. Sets `CLAUDE_CONFIG_DIR` to the profile's directory (except for `default`)
 3. If Hive Mind is enabled, injects the knowledge map (not page contents) via `--append-system-prompt`
 4. Spawns `claude` with any configured flags and passthrough arguments
-5. After the session exits, if Hive Mind is enabled, runs a headless analysis session that upserts new knowledge into the wiki
+5. After the session exits, if Hive Mind is enabled, asks whether to keep it (per the profile's `analyze` setting) and queues it for background analysis
 
 ## Directory Structure
 
@@ -303,6 +303,8 @@ When you launch a profile, clauth:
   │   ├── company/
   │   ├── personal/
   │   └── people/
+  ├── hive-backups/     # timestamped wiki snapshots (last 3 kept per kind)
+  ├── hive-queue.json   # sessions waiting for / failed analysis
   ├── folders.json      # directory → profile mapping
   └── .last             # globally last-used profile name
 ```
