@@ -576,9 +576,10 @@ program
           return;
         }
 
+        const project = getProjectName();
         const sessions = await listRecentSessions(withHive, limit);
         if (sessions.length === 0) {
-          console.log(chalk.dim("  No sessions found."));
+          console.log(chalk.dim(`  No sessions found for ${project} in this directory.`));
           return;
         }
 
@@ -593,17 +594,14 @@ program
           new: chalk.dim(pad("–")),
         };
 
-        console.log(chalk.bold(`\n  Last ${sessions.length} sessions\n`));
+        console.log(chalk.bold(`\n  Last ${sessions.length} sessions in ${chalk.cyan(project)}\n`));
         const statuses: string[] = [];
         for (const [i, s] of sessions.entries()) {
           const status = await statusOf(state, s.logPath);
           statuses.push(status);
           const when = s.modifiedAt.toISOString().replace("T", " ").slice(5, 16);
           const label = s.firstPrompt ?? s.slug ?? chalk.dim("(no prompt found)");
-          console.log(
-            `  ${String(i + 1).padStart(2)}. ${marks[status]}  ${chalk.dim(when)}  ` +
-            `${chalk.cyan(s.project.padEnd(14))} ${label}`
-          );
+          console.log(`  ${String(i + 1).padStart(2)}. ${marks[status]}  ${chalk.dim(when)}  ${label}`);
         }
 
         const addable = sessions.filter((_, i) => statuses[i] !== "pending");

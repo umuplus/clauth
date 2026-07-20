@@ -970,11 +970,11 @@ export interface SessionSummary {
 }
 
 /**
- * Only the head of a log is read — session files reach megabytes. Sized generously
- * because a single line can itself be tens of kilobytes (a large tool result), so a
- * small window can miss the `cwd` field entirely and leave the session unattributed.
+ * Only the head of a log is read — session files reach megabytes, while the slug
+ * and first prompt both sit near the top. The picker reads this for every listed
+ * session, so the window is kept modest.
  */
-const SESSION_HEAD_BYTES = 1_000_000;
+const SESSION_HEAD_BYTES = 200_000;
 
 async function readHead(path: string): Promise<string | null> {
   try {
@@ -995,13 +995,12 @@ async function readHead(path: string): Promise<string | null> {
  */
 async function describeSession(
   logPath: string
-): Promise<{ slug: string | null; firstPrompt: string | null; project: string | null }> {
+): Promise<{ slug: string | null; firstPrompt: string | null }> {
   const head = await readHead(logPath);
-  if (head === null) return { slug: null, firstPrompt: null, project: null };
+  if (head === null) return { slug: null, firstPrompt: null };
 
   let slug: string | null = null;
   let firstPrompt: string | null = null;
-  let project: string | null = null;
 
   for (const line of head.split("\n")) {
     if (!line.trim()) continue;
@@ -1013,7 +1012,6 @@ async function describeSession(
     }
 
     if (!slug && typeof d.slug === "string") slug = d.slug;
-    if (!project && typeof d.cwd === "string" && d.cwd) project = basename(d.cwd);
     if (firstPrompt || d.type !== "user" || d.isMeta) continue;
 
     const content = d?.message?.content;
@@ -1032,19 +1030,29 @@ async function describeSession(
     }
   }
 
-  return { slug, firstPrompt, project };
+  return { slug, firstPrompt };
 }
 
 /** Most recent sessions across the given profiles, newest first. */
+/**
+ * Recent sessions for the current directory only — the same scoping the
+ * post-session queue uses. Restricting to this project's own log folder means
+ * the project is `basename(cwd)` with certainty, so nothing has to be recovered
+ * from a log's `cwd` (which the picker can't do reliably: the folder encoding
+ * replaces every `/` with `-`, losing dashes in names like dijji-ai).
+ */
 export async function listRecentSessions(
   profiles: { name: string; configDir: string }[],
-  limit: number
+  limit: number,
+  cwd: string = process.cwd()
 ): Promise<SessionSummary[]> {
+  const project = basename(cwd);
   const found: { logPath: string; profile: string; mtime: number }[] = [];
 
   for (const profile of profiles) {
+    const scope = sessionDirForCwd(profile.configDir, cwd) + sep;
     for (const [logPath, mtime] of await snapshotSessionFiles(profile.configDir)) {
-      found.push({ logPath, profile: profile.name, mtime });
+      if (logPath.startsWith(scope)) found.push({ logPath, profile: profile.name, mtime });
     }
   }
 
@@ -1052,13 +1060,10 @@ export async function listRecentSessions(
 
   const out: SessionSummary[] = [];
   for (const entry of found.slice(0, limit)) {
-    // Project comes from the log rather than the directory name: the encoding
-    // replaces every `/` with `-`, so a project whose own name contains a dash
-    // (dijji-ai) cannot be recovered from the path.
-    const { slug, firstPrompt, project } = await describeSession(entry.logPath);
+    const { slug, firstPrompt } = await describeSession(entry.logPath);
     out.push({
       logPath: entry.logPath,
-      project: project ?? "?",
+      project,
       profile: entry.profile,
       modifiedAt: new Date(entry.mtime),
       slug,
