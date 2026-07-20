@@ -462,27 +462,64 @@ export async function snapshotSessionFiles(
   return snapshot;
 }
 
+/** Claude Code stores a project's logs under the cwd with every `/` turned into `-`. */
+export function sessionDirForCwd(configDir: string, cwd: string): string {
+  return join(configDir, "projects", cwd.replace(/\//g, "-"));
+}
+
+/**
+ * Find the log of the session that just ended.
+ *
+ * Scoped to the launch directory's own log folder: scanning every project meant
+ * that any other Claude session running at the same time — its log being written
+ * more recently — was picked instead, and its knowledge filed under the wrong
+ * project. A newly created file also wins over a merely modified one, so a
+ * concurrent session in the *same* project does not shadow the new one either.
+ */
 export async function detectNewSessionLog(
   configDir: string,
-  before: Map<string, number>
+  before: Map<string, number>,
+  cwd: string = process.cwd()
 ): Promise<string | null> {
+  const scope = sessionDirForCwd(configDir, cwd) + sep;
   const after = await snapshotSessionFiles(configDir);
 
-  let bestPath: string | null = null;
-  let bestMtime = 0;
+  let created: { path: string; mtime: number } | null = null;
+  let modified: { path: string; mtime: number } | null = null;
 
   for (const [filePath, mtimeMs] of after) {
+    if (!filePath.startsWith(scope)) continue;
+
     const prevMtime = before.get(filePath);
-    // New file or modified file
-    if (prevMtime === undefined || mtimeMs > prevMtime) {
-      if (mtimeMs > bestMtime) {
-        bestMtime = mtimeMs;
-        bestPath = filePath;
-      }
+    if (prevMtime === undefined) {
+      if (!created || mtimeMs > created.mtime) created = { path: filePath, mtime: mtimeMs };
+    } else if (mtimeMs > prevMtime) {
+      if (!modified || mtimeMs > modified.mtime) modified = { path: filePath, mtime: mtimeMs };
     }
   }
 
-  return bestPath;
+  return (created ?? modified)?.path ?? null;
+}
+
+/**
+ * The project a session actually belongs to, read from the log's own `cwd`.
+ * Taking it from the launching process instead lets the label drift away from
+ * the content whenever detection and the shell disagree.
+ */
+export async function readSessionProject(logPath: string): Promise<string | null> {
+  const head = await readHead(logPath);
+  if (head === null) return null;
+
+  for (const line of head.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const d = JSON.parse(line);
+      if (typeof d.cwd === "string" && d.cwd) return basename(d.cwd);
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 // --- project name ---
@@ -952,28 +989,39 @@ export interface SessionSummary {
   firstPrompt: string | null;
 }
 
-/** Only the head of a log is read — session files reach megabytes, and the label lives at the top. */
-const SESSION_HEAD_BYTES = 200_000;
+/**
+ * Only the head of a log is read — session files reach megabytes. Sized generously
+ * because a single line can itself be tens of kilobytes (a large tool result), so a
+ * small window can miss the `cwd` field entirely and leave the session unattributed.
+ */
+const SESSION_HEAD_BYTES = 1_000_000;
+
+async function readHead(path: string): Promise<string | null> {
+  try {
+    const handle = await open(path, "r");
+    const buf = Buffer.alloc(SESSION_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, SESSION_HEAD_BYTES, 0);
+    await handle.close();
+    return buf.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return null;
+  }
+}
 
 /**
  * A human label for a session: Claude Code's own slug when present, plus the
  * first real user message. Harness noise (`[Request interrupted…]`, tool
  * results, slash commands) is skipped — those are never what the session was about.
  */
-async function describeSession(logPath: string): Promise<{ slug: string | null; firstPrompt: string | null }> {
-  let head: string;
-  try {
-    const handle = await open(logPath, "r");
-    const buf = Buffer.alloc(SESSION_HEAD_BYTES);
-    const { bytesRead } = await handle.read(buf, 0, SESSION_HEAD_BYTES, 0);
-    await handle.close();
-    head = buf.subarray(0, bytesRead).toString("utf8");
-  } catch {
-    return { slug: null, firstPrompt: null };
-  }
+async function describeSession(
+  logPath: string
+): Promise<{ slug: string | null; firstPrompt: string | null; project: string | null }> {
+  const head = await readHead(logPath);
+  if (head === null) return { slug: null, firstPrompt: null, project: null };
 
   let slug: string | null = null;
   let firstPrompt: string | null = null;
+  let project: string | null = null;
 
   for (const line of head.split("\n")) {
     if (!line.trim()) continue;
@@ -985,6 +1033,7 @@ async function describeSession(logPath: string): Promise<{ slug: string | null; 
     }
 
     if (!slug && typeof d.slug === "string") slug = d.slug;
+    if (!project && typeof d.cwd === "string" && d.cwd) project = basename(d.cwd);
     if (firstPrompt || d.type !== "user" || d.isMeta) continue;
 
     const content = d?.message?.content;
@@ -1003,7 +1052,7 @@ async function describeSession(logPath: string): Promise<{ slug: string | null; 
     }
   }
 
-  return { slug, firstPrompt };
+  return { slug, firstPrompt, project };
 }
 
 /** Most recent sessions across the given profiles, newest first. */
@@ -1023,12 +1072,13 @@ export async function listRecentSessions(
 
   const out: SessionSummary[] = [];
   for (const entry of found.slice(0, limit)) {
-    const { slug, firstPrompt } = await describeSession(entry.logPath);
-    // The per-project directory name is the encoded cwd; its last segment is the project.
-    const project = basename(dirname(entry.logPath)).split("-").filter(Boolean).pop() ?? "?";
+    // Project comes from the log rather than the directory name: the encoding
+    // replaces every `/` with `-`, so a project whose own name contains a dash
+    // (dijji-ai) cannot be recovered from the path.
+    const { slug, firstPrompt, project } = await describeSession(entry.logPath);
     out.push({
       logPath: entry.logPath,
-      project,
+      project: project ?? "?",
       profile: entry.profile,
       modifiedAt: new Date(entry.mtime),
       slug,

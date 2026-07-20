@@ -67,6 +67,7 @@ import {
   runHiveBackfillSummaries,
   computeHiveUsage,
   listRecentSessions,
+  readSessionProject,
   FLAT_CATEGORIES,
   type HiveCategory,
   type SchemaUpgrade,
@@ -946,7 +947,8 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
           // Queue, don't analyse. Running it here blocked the terminal for
           // minutes after every session, so it got interrupted — and an
           // interrupted analysis lost that session's knowledge for good.
-          const project = getProjectName();
+          // The log's own cwd is authoritative; the shell's may differ.
+          const project = (await readSessionProject(logPath)) ?? getProjectName();
           const mode = config.hiveMind?.analyze ?? "ask";
 
           // Only ask when there is someone to answer; piped or scripted runs
