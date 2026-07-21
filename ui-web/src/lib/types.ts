@@ -53,6 +53,8 @@ export interface QueueState {
   pending: QueueItem[];
   failed: QueueItem[];
   lastProcessed: { project: string; at: string; summary: string | null } | null;
+  /** Set while an analyzer holds the lock — pending[0] is the one being worked on. */
+  running: { pid: number; startedAt: string } | null;
 }
 
 export type HiveStreamEvent =

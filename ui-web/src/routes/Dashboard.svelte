@@ -59,6 +59,21 @@
   function when(ts: string): string {
     return ts.replace("T", " ").slice(0, 16);
   }
+
+  function elapsed(startedAt: string): string {
+    const secs = Math.max(0, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000));
+    return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
+
+  // While an analysis is running the queue changes on its own, so poll to keep
+  // the card honest — a stale "analysing" that already finished is worse than none.
+  $effect(() => {
+    if (!queue?.running) return;
+    const id = setInterval(async () => {
+      try { queue = await api.getHiveQueue(); } catch { /* keep last known */ }
+    }, 5000);
+    return () => clearInterval(id);
+  });
 </script>
 
 <div class="p-8 max-w-6xl">
@@ -72,19 +87,35 @@
       <div class="text-xs uppercase tracking-wider text-neutral-500 mb-2">Analysis queue</div>
 
       {#if queue.pending.length > 0}
+        {@const running = queue.running}
         <p class="text-sm text-neutral-300 mb-1">
-          {queue.pending.length} session{queue.pending.length > 1 ? "s" : ""} waiting to be analysed
+          {#if running}
+            Analysing 1 of {queue.pending.length} · {queue.pending.length - 1} waiting
+          {:else}
+            {queue.pending.length} session{queue.pending.length > 1 ? "s" : ""} waiting to be analysed
+          {/if}
         </p>
-        <ul class="text-xs text-neutral-500 mb-3">
-          {#each queue.pending.slice(0, 5) as item}
-            <li>{item.project} — queued {when(item.enqueuedAt)}{item.attempts > 0 ? ` (${item.attempts} failed attempt${item.attempts > 1 ? "s" : ""})` : ""}</li>
+        <ul class="text-xs mb-3">
+          {#each queue.pending.slice(0, 5) as item, i}
+            {#if running && i === 0}
+              <li class="text-accent">
+                <span class="inline-block animate-pulse">●</span>
+                {item.project} — analysing now, {elapsed(running.startedAt)} elapsed
+              </li>
+            {:else}
+              <li class="text-neutral-500">
+                {item.project} — queued {when(item.enqueuedAt)}{item.attempts > 0 ? ` (${item.attempts} failed attempt${item.attempts > 1 ? "s" : ""})` : ""}
+              </li>
+            {/if}
           {/each}
-          {#if queue.pending.length > 5}<li>… and {queue.pending.length - 5} more</li>{/if}
+          {#if queue.pending.length > 5}<li class="text-neutral-500">… and {queue.pending.length - 5} more</li>{/if}
         </ul>
-        <p class="text-xs text-neutral-500 mb-3">
-          These run in the background after each session. To force a pass now:
-          <span class="font-mono">clauth hive --catchup</span>
-        </p>
+        {#if !running}
+          <p class="text-xs text-neutral-500 mb-3">
+            Nothing is running right now. These start in the background after a session, or force a pass:
+            <span class="font-mono">clauth hive --catchup</span>
+          </p>
+        {/if}
       {/if}
 
       {#if queue.failed.length > 0}

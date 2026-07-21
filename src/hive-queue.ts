@@ -96,6 +96,29 @@ function processAlive(pid: number): boolean {
  * A lock whose owner is gone (or that is simply old) is taken over — otherwise a
  * process killed mid-analysis would block the queue permanently.
  */
+/** Who holds the lock right now, or null if nobody live does. */
+export interface RunningAnalysis {
+  pid: number;
+  startedAt: string;
+}
+
+/**
+ * The analysis currently in progress, if any. Read from the lock rather than
+ * tracked separately: the lock is already the single source of truth for "an
+ * analyzer is running", so a second record could only disagree with it.
+ */
+export async function readRunning(): Promise<RunningAnalysis | null> {
+  try {
+    const raw = JSON.parse(await readFile(LOCK_PATH, "utf8")) as { pid?: number; at?: string };
+    if (typeof raw.pid !== "number" || typeof raw.at !== "string") return null;
+    const age = Date.now() - new Date(raw.at).getTime();
+    if (!processAlive(raw.pid) || age >= LOCK_STALE_MS) return null;
+    return { pid: raw.pid, startedAt: raw.at };
+  } catch {
+    return null;
+  }
+}
+
 export async function acquireLock(): Promise<boolean> {
   try {
     const handle = await open(LOCK_PATH, "wx");
@@ -106,14 +129,7 @@ export async function acquireLock(): Promise<boolean> {
     // Lock exists — decide whether it is still live.
   }
 
-  try {
-    const raw = JSON.parse(await readFile(LOCK_PATH, "utf8")) as { pid?: number; at?: string };
-    const age = raw.at ? Date.now() - new Date(raw.at).getTime() : Infinity;
-    const live = typeof raw.pid === "number" && processAlive(raw.pid) && age < LOCK_STALE_MS;
-    if (live) return false;
-  } catch {
-    // Unreadable lock file — treat as stale.
-  }
+  if (await readRunning()) return false;
 
   await releaseLock();
   try {

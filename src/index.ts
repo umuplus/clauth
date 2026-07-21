@@ -43,6 +43,7 @@ import {
   markFailed,
   markSkipped,
   statusOf,
+  readRunning,
   retryFailed,
   clearFailed,
   MAX_ATTEMPTS,
@@ -676,14 +677,21 @@ program
         }
 
         if (state.pending.length > 0) {
+          const running = await readRunning();
           console.log(`  Pending (${state.pending.length})`);
-          state.pending.forEach((p) =>
-            console.log(
-              chalk.dim(`    ${p.project.padEnd(18)} queued ${p.enqueuedAt.replace("T", " ").slice(0, 16)}` +
-                (p.attempts > 0 ? `  (${p.attempts} failed attempt${p.attempts > 1 ? "s" : ""})` : ""))
-            )
-          );
-          console.log(chalk.dim("\n  Run: clauth hive --catchup\n"));
+          state.pending.forEach((p, i) => {
+            const queued = p.enqueuedAt.replace("T", " ").slice(0, 16);
+            const attempts = p.attempts > 0 ? `  (${p.attempts} failed attempt${p.attempts > 1 ? "s" : ""})` : "";
+            if (running && i === 0) {
+              const mins = Math.round((Date.now() - new Date(running.startedAt).getTime()) / 60000);
+              console.log(chalk.cyan(`  ▸ ${p.project.padEnd(18)} analysing now (${mins}m, pid ${running.pid})`));
+            } else {
+              console.log(chalk.dim(`    ${p.project.padEnd(18)} queued ${queued}${attempts}`));
+            }
+          });
+          console.log(running
+            ? chalk.dim("\n  An analysis is in progress; the rest follow one at a time.\n")
+            : chalk.dim("\n  Nothing running. Start a pass: clauth hive --catchup\n"));
         }
 
         if (state.failed.length > 0) {

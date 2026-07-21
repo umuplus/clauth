@@ -20,7 +20,7 @@ import {
   type HiveStreamEvent,
   type HiveAnalysisResult,
 } from "../../hive.js";
-import { readQueue, retryFailed, clearFailed } from "../../hive-queue.js";
+import { readQueue, readRunning, retryFailed, clearFailed } from "../../hive-queue.js";
 import {
   getClaudeConfigDir,
   getFolderProfile,
@@ -136,7 +136,8 @@ hiveRoutes.get("/page/:path{.+}", async (c) => {
 // --- analysis queue ---
 
 hiveRoutes.get("/queue", async (c) => {
-  return c.json(await readQueue());
+  const [state, running] = await Promise.all([readQueue(), readRunning()]);
+  return c.json({ ...state, running });
 });
 
 hiveRoutes.post("/queue/retry-failed", async (c) => {
