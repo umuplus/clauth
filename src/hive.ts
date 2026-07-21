@@ -34,8 +34,10 @@ async function writeIfMissing(path: string, content: string): Promise<void> {
  * 4 — `## Sources` provenance section; each ingest records its origin on every
  *     page it touches, so a wrong claim can be traced to its source.
  * 5 — Synthesize operation; concepts/ pages must cite >=2 projects.
+ * 6 — concepts/ restricted to technical knowledge; person/process recurrences
+ *     (which pass the two-project test trivially) go to personal/ or company/.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 export interface SchemaUpgrade {
   from: number;
@@ -119,7 +121,7 @@ export async function ensureHiveDir(): Promise<SchemaUpgrade | null> {
   return upgradeSchema(new Date().toISOString().replace(/[:.]/g, "-"));
 }
 
-const SCHEMA_CONTENT = `<!-- clauth-schema-version: 5 -->
+const SCHEMA_CONTENT = `<!-- clauth-schema-version: 6 -->
 # Hive Mind Wiki — Schema
 
 You are maintaining a personal knowledge wiki. This file governs how you read, write, and maintain every page in this wiki. Follow these conventions exactly.
@@ -160,7 +162,7 @@ Sources include Claude Code session logs (auto-analyzed after sessions), manual 
 
 **projects/**: Every project gets its own subdirectory. The directory name is derived from the working directory (e.g., \`/Users/umut/Projects/clauth\` → \`clauth\`). This prevents cross-project entity confusion.
 
-**concepts/**: Knowledge that spans multiple projects — a library, a pattern, a technique, a tool. Link from project pages when relevant.
+**concepts/**: **Technical** knowledge that spans multiple projects — a library, a pattern, a technique, a tool. Link from project pages when relevant. Something that recurs across projects because the *same person* works on them — how they want to be worked with, their habits, their review preferences — is not a concept: file it under \`personal/\` (the owner's own preferences) or \`company/\` (process and ways of working). The test is whether the knowledge would still hold if someone else did the work.
 
 **clients/**: One page per client/customer. Include which projects they own, key requirements, communication style, important context. Link to project pages.
 
@@ -354,6 +356,12 @@ knowledge no single project page can hold, because its value is the comparison.
    - **It must involve at least two projects.** Something in one project belongs on
      that project's page, not here. A concept page that cites fewer than two
      projects is invalid and will be flagged.
+   - **It must be technical.** Two projects share the owner's habits, review
+     preferences and working style by definition — that is one person, not a
+     recurring technical pattern, and it passes the two-project test without
+     meaning anything. Such findings belong in \`personal/\` or \`company/\`.
+     Test: would this still be true if someone else did the work? If no, it is
+     not a concept.
    - **Cite the evidence.** Link to the specific project pages the pattern is drawn
      from. These links are how the claim is checked.
    - **The difference is the content.** If two projects did the same thing
