@@ -49,6 +49,15 @@ import {
   MAX_ATTEMPTS,
 } from "./hive-queue.js";
 import {
+  readQuestions,
+  openQuestions,
+  unappliedAnswers,
+  answerQuestion,
+  dismissQuestion,
+  dismissAllOpen,
+  markApplied,
+} from "./hive-questions.js";
+import {
   ensureHiveDir,
   snapshotSessionFiles,
   detectNewSessionLog,
@@ -67,6 +76,7 @@ import {
   resetHiveAll,
   runHiveBackfillSummaries,
   runHiveSynthesize,
+  runHiveAnswers,
   computeHiveUsage,
   analyzeLinks,
   listRecentSessions,
@@ -120,6 +130,59 @@ function confirmDefaultYes(prompt: string): Promise<boolean> {
   });
 }
 
+/**
+ * Ask several questions in a row over a single readline interface.
+ *
+ * One interface per question would drop whatever is already buffered on stdin
+ * when it closes — fine for a lone prompt, but in a loop it loses piped input
+ * and can swallow a fast typist's next line. On EOF the outstanding prompt
+ * resolves to `eof` rather than hanging forever on input that will never come.
+ */
+async function askSeries<T>(
+  run: (question: (prompt: string) => Promise<string>) => Promise<T>,
+  eof = ""
+): Promise<T> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Lines are buffered rather than read with rl.question(), which only captures
+  // the line that arrives *while* it is waiting. Piped or pasted input arrives
+  // faster than the loop can ask, and everything between prompts is lost.
+  const buffered: string[] = [];
+  let waiting: ((line: string) => void) | null = null;
+  let closed = false;
+
+  const deliver = (line: string) => {
+    const resolveWaiting = waiting;
+    waiting = null;
+    if (resolveWaiting) resolveWaiting(line);
+    else buffered.push(line);
+  };
+
+  rl.on("line", deliver);
+  rl.on("close", () => {
+    closed = true;
+    if (waiting) deliver(eof);
+  });
+
+  const question = (prompt: string): Promise<string> =>
+    new Promise((res) => {
+      const ready = buffered.shift();
+      if (ready !== undefined) {
+        // Nothing echoed it — show it so the transcript still reads as a dialogue.
+        process.stdout.write(chalk.yellow(prompt) + ready + "\n");
+        return res(ready);
+      }
+      if (closed) return res(eof);
+      process.stdout.write(chalk.yellow(prompt));
+      waiting = res;
+    });
+
+  try {
+    return await run(question);
+  } finally {
+    rl.close();
+  }
+}
+
 /** Parse "1,3-5" into indices. Invalid pieces are ignored rather than aborting the pick. */
 function parseSelection(input: string, max: number): number[] {
   const picked = new Set<number>();
@@ -149,14 +212,71 @@ function spawnQueueWorker(): void {
   child.unref();
 }
 
-/** Process queued sessions one at a time. Returns how many succeeded. */
-async function processQueue(quiet: boolean): Promise<number> {
-  if (!(await acquireLock())) {
-    if (!quiet) console.log(chalk.dim("  hive: another analysis is already running."));
+/** Stream a run's tool calls as dim progress lines. Silent in quiet mode. */
+function hiveToolLogger(quiet: boolean) {
+  if (quiet) return undefined;
+  return (ev: { kind: string; name?: string; detail?: string }) => {
+    if (ev.kind !== "tool") return;
+    console.log(chalk.dim(ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`));
+  };
+}
+
+function reportQuestions(count: number, quiet: boolean): void {
+  if (count === 0 || quiet) return;
+  console.log(
+    chalk.cyan(`  hive: asked ${count} question${count > 1 ? "s" : ""} — answer with: clauth hive --questions`)
+  );
+}
+
+/**
+ * Write the owner's answers back into the wiki in one pass.
+ *
+ * Runs under the analysis lock, since it edits the same pages the analyzer does.
+ * The caller must already hold it.
+ */
+async function applyAnswers(quiet: boolean): Promise<number> {
+  const pending = unappliedAnswers(await readQuestions());
+  if (pending.length === 0) return 0;
+
+  const profileName = (await getFolderProfile()) ?? (await getLastUsed());
+  if (!profileName) {
+    if (!quiet) console.log(chalk.dim("  hive: no profile to write answers with."));
     return 0;
   }
 
+  if (!quiet) console.log(chalk.dim(`  hive: writing ${pending.length} answer(s) into the wiki...`));
+  const result = await runHiveAnswers(
+    pending,
+    getClaudeConfigDir(profileName),
+    profileName,
+    hiveToolLogger(quiet)
+  );
+
+  if (result.error) {
+    // Left as `answered`, so the next pass retries rather than losing the answer.
+    if (!quiet) console.log(chalk.red(`  hive: answers not written — ${result.error}`));
+    return 0;
+  }
+
+  await markApplied(pending.map((q) => q.id));
+  if (!quiet) console.log(chalk.dim(`  hive: ${result.summary ?? "answers written"}`));
+  return pending.length;
+}
+
+/**
+ * Drain the background queue: analyse waiting sessions, then write any answers
+ * the owner has given. Both edit the wiki, so both run under the one lock — and
+ * pairing them means an answer given while an analysis was running still lands
+ * without the user having to run anything.
+ */
+async function processQueue(quiet: boolean): Promise<{ sessions: number; answers: number }> {
+  if (!(await acquireLock())) {
+    if (!quiet) console.log(chalk.dim("  hive: another analysis is already running."));
+    return { sessions: 0, answers: 0 };
+  }
+
   let done = 0;
+  let answers = 0;
   try {
     for (let item = await peek(); item; item = await peek()) {
       if (!quiet) console.log(chalk.dim(`  hive: analyzing ${item.project}...`));
@@ -166,13 +286,7 @@ async function processQueue(quiet: boolean): Promise<number> {
           item.project,
           getClaudeConfigDir(item.profile),
           item.profile,
-          quiet
-            ? undefined
-            : (ev) => {
-                if (ev.kind === "tool") {
-                  console.log(chalk.dim(ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`));
-                }
-              }
+          hiveToolLogger(quiet)
         );
 
         if (result.error) {
@@ -182,16 +296,19 @@ async function processQueue(quiet: boolean): Promise<number> {
           await markDone(item.logPath, result.summary, item.project);
           done++;
           if (!quiet) console.log(chalk.dim(`  hive: ${result.summary ?? "done"}`));
+          reportQuestions(result.questions.length, quiet);
         }
       } catch (err) {
         await markFailed(item.logPath, String(err));
         if (!quiet) console.log(chalk.red(`  hive: failed — ${err}`));
       }
     }
+
+    answers = await applyAnswers(quiet);
   } finally {
     await releaseLock();
   }
-  return done;
+  return { sessions: done, answers };
 }
 
 function getObsidianConfigPath(): string | null {
@@ -415,6 +532,8 @@ program
   .option("--synthesize", "Extract cross-project patterns into concepts/ pages")
   .option("--links", "Check the wiki link graph: broken links, one-way pairs, orphans")
   .option("--usage", "Show whether sessions actually open the wiki pages they are pointed at")
+  .option("--questions", "Answer the questions the wiki has for you")
+  .option("--clear", "Dismiss every open question (use with --questions)")
   .option("--queue", "Show sessions waiting to be analysed")
   .option("--catchup", "Analyse queued sessions now")
   .option("--sessions [n]", "List recent sessions and pick ones to analyse (default 20)")
@@ -426,6 +545,7 @@ program
     query?: boolean; lint?: boolean; file?: string;
     index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
     reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; synthesize?: boolean; links?: boolean; usage?: boolean;
+    questions?: boolean; clear?: boolean;
     queue?: boolean; catchup?: boolean; sessions?: string | boolean; retryFailed?: boolean; clearFailed?: boolean; quiet?: boolean;
   }) => {
     try {
@@ -639,9 +759,82 @@ program
         return;
       }
 
+      if (opts.questions) {
+        if (opts.clear) {
+          const n = await dismissAllOpen();
+          console.log(chalk.green(`  ✓ Dismissed ${n} open question(s)`));
+          return;
+        }
+
+        const state = await readQuestions();
+        const open = openQuestions(state);
+        const waiting = unappliedAnswers(state).length;
+
+        if (open.length === 0) {
+          console.log(chalk.dim("\n  No open questions — the wiki hasn't hit anything only you can answer.\n"));
+          if (waiting > 0) {
+            console.log(chalk.dim(`  ${waiting} answer(s) still to be written into the wiki: clauth hive --catchup\n`));
+          }
+          return;
+        }
+
+        console.log(chalk.bold(`\n  ${open.length} question${open.length > 1 ? "s" : ""} from the hive\n`));
+        console.log(chalk.dim("  Things it could not work out from your sessions — only you know them."));
+        console.log(chalk.dim("  Type an answer, or: Enter to skip · d to dismiss · q to quit\n"));
+
+        let answered = 0;
+        let dismissed = 0;
+        let skipped = 0;
+
+        await askSeries(async (question) => {
+          for (const [i, q] of open.entries()) {
+            console.log(chalk.cyan(`  [${i + 1}/${open.length}] `) + chalk.dim(q.page ?? "(no page recorded)"));
+            console.log(`  ${q.question}`);
+            if (q.why) console.log(chalk.dim(`  → would change: ${q.why}`));
+
+            const reply = (await question("  > ")).trim();
+            console.log();
+
+            if (reply === "q") break;
+            if (reply === "") {
+              skipped++;
+              continue;
+            }
+            if (reply === "d") {
+              await dismissQuestion(q.id);
+              dismissed++;
+              continue;
+            }
+            await answerQuestion(q.id, reply);
+            answered++;
+          }
+        }, "q");
+
+        const tally = [
+          answered > 0 ? `${answered} answered` : null,
+          dismissed > 0 ? `${dismissed} dismissed` : null,
+          skipped > 0 ? `${skipped} skipped` : null,
+        ].filter(Boolean);
+        console.log(chalk.green(`  ✓ ${tally.length > 0 ? tally.join(", ") : "nothing changed"}`));
+
+        if (answered > 0) {
+          // Read the lock before spawning, or the worker we are about to start
+          // is itself the "analysis in progress" this reports.
+          const running = await readRunning();
+          // One background pass writes every answer, rather than one run each.
+          spawnQueueWorker();
+          console.log(chalk.dim(running
+            ? "  An analysis is running; your answers go into the wiki once it finishes.\n"
+            : "  Writing them into the wiki in the background.\n"));
+        } else {
+          console.log();
+        }
+        return;
+      }
+
       if (opts.catchup) {
-        const n = await processQueue(!!opts.quiet);
-        if (!opts.quiet && n === 0) {
+        const { sessions, answers } = await processQueue(!!opts.quiet);
+        if (!opts.quiet && sessions === 0 && answers === 0) {
           const { pending } = await readQueue();
           if (pending.length === 0) console.log(chalk.dim("  hive: nothing queued."));
         }
@@ -868,6 +1061,13 @@ program
           res.underCited.forEach((p) => console.log(chalk.yellow(`    ${p}`)));
           console.log(chalk.dim("  Review these; they may be a single-project note that belongs on the project page instead."));
         }
+
+        if (res.questions.length > 0) {
+          console.log(chalk.bold(`\n  Questions for you (${res.questions.length})`));
+          res.questions.forEach((q) => console.log(`    ${q.question}`));
+          console.log(chalk.dim("  Answer them with: clauth hive --questions"));
+        }
+
         console.log(chalk.dim(`\n  Backup: ${res.backupDir}`));
         return;
       }
@@ -905,6 +1105,7 @@ program
       } else {
         console.log(chalk.dim("  hive: done (no summary returned)"));
       }
+      reportQuestions(result.questions.length, false);
     } catch (err) {
       console.log(chalk.red(`  hive: unexpected error — ${err}`));
       process.exit(1);
@@ -978,6 +1179,10 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
     const { pending, failed } = await readQueue();
     if (pending.length > 0) flags.push(`${pending.length} queued`);
     if (failed.length > 0) flags.push(`${failed.length} failed`);
+
+    // Questions wait for the user, so they surface where the user already looks.
+    const open = openQuestions(await readQuestions());
+    if (open.length > 0) flags.push(`${open.length} question${open.length > 1 ? "s" : ""}`);
   }
 
   await setLastUsed(name);

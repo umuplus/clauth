@@ -171,6 +171,10 @@ clauth hive --sessions 20               # pick from this project's recent sessio
 clauth hive --queue --retry-failed      # requeue sessions that gave up
 clauth hive --queue --clear-failed      # drop them
 
+# Questions the wiki has for you
+clauth hive --questions                 # answer them (Enter skips, d dismisses, q quits)
+clauth hive --questions --clear         # dismiss all open questions
+
 # Maintenance
 clauth hive --backfill-summaries        # fill in the summary field on every page
 clauth hive --synthesize                # extract cross-project patterns into concepts/
@@ -245,6 +249,35 @@ clauth hive --backfill-summaries
 
 That copies the wiki to `~/.clauth/hive-backups/` first, and verifies afterwards that only frontmatter changed.
 
+### When the wiki asks you something
+
+Some knowledge is not in your sessions at all. Synthesis can see that two projects solved the same problem differently — but the *reason* one went one way is usually in your head and nowhere else, and that reason is the part worth keeping.
+
+So the analyzer is allowed to ask. It never blocks on the answer: the page is written either way, with the gap marked in place:
+
+```markdown
+> **Rationale unrecorded** — Why did mmiProductHUB go single-table where spinneys used table-per-entity?
+```
+
+and the question goes to a queue. Answer them whenever you like:
+
+```bash
+clauth hive --questions
+```
+
+```
+  2 questions from the hive
+
+  [1/2] concepts/dynamodb-gsi-discipline.md
+  Why did mmiProductHUB go single-table where spinneys used table-per-entity?
+  → would change: whether the page reads as one recommendation or two valid choices
+  >
+```
+
+Type an answer, press Enter to skip it for now, `d` to dismiss it for good, `q` to stop. Answers are folded into the wiki in one background pass — the marker is replaced by the knowledge, written as prose, with the question thrown away. Open questions show in the launch banner, alongside the queue counts.
+
+The bar for asking is deliberately high: the analyzer may only ask when the answer exists in no source it can read **and** would change what it writes, at most 3 per run, never twice. A question is cheap for the model and expensive for you — the same asymmetry that made the old blocking analyzer fail.
+
 ### The schema
 
 The wiki has its own `CLAUDE.md` at `~/.clauth/hive/CLAUDE.md` that governs how the LLM maintains it — page format, operation rules, create-vs-update logic. It's co-evolved over time. To refresh it from the latest clauth version: delete the file and run any clauth command to regenerate.
@@ -266,6 +299,7 @@ Hive Mind is a direct implementation of the **LLM wiki** pattern proposed by And
 
 - **Source capture is inverted — and automated.** Karpathy's pattern assumes humans curate the raw sources and direct ingestion. Hive Mind's distinctive bet is the opposite: the primary "raw source" is your *coding sessions themselves*, ingested automatically by a post-session analyzer. The wiki compounds passively, without you stopping to file anything — at the cost of trading away human-in-the-loop curation, which makes the `--lint` discipline more load-bearing, not less. (The manual `clauth hive "<text>"` / `--file` path preserves the classic human-curated flow alongside it.)
 - **Closed-loop context injection.** The gist focuses on read/write within the wiki. Hive Mind adds a step beyond it: accumulated project knowledge is re-injected into future sessions via `--append-system-prompt`, so the wiki doesn't just answer queries — it silently primes the next session. This turns "compounding artifact" into a closed feedback loop specific to the coding-agent setting.
+- **The wiki can ask back.** In the gist, knowledge only ever flows toward the wiki. Hive Mind adds a reverse channel: when synthesis hits something derivable from no source — typically *why* two projects diverged — it queues a question rather than guessing or dropping the finding, and you answer it later via `clauth hive --questions`. This is the one place the pattern needs a human, and it stays non-blocking: the page is always written, with the gap marked.
 - **Query is read-only by design.** Karpathy suggests queries should file valuable discoveries back into the wiki. Hive Mind keeps `--query` side-effect-free so reading never mutates the knowledge base; new knowledge enters only through the (automatic or manual) ingest paths, where it's subject to the schema's create-vs-update discipline. This is a deliberate trade — predictability over maximal compounding.
 
 ## How It Works

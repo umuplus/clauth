@@ -1,7 +1,14 @@
 import { join, basename, dirname, resolve, relative, sep } from "node:path";
-import { mkdir, access, writeFile, readFile, readdir, stat, rm, cp, open } from "node:fs/promises";
+import { mkdir, access, writeFile, readFile, readdir, stat, rm, cp, open, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
+import {
+  addQuestions,
+  askedQuestionTexts,
+  MAX_PER_RUN,
+  type Question,
+  type QuestionDraft,
+} from "./hive-questions.js";
 
 const HIVE_DIR = join(getClauthDir(), "hive");
 
@@ -36,8 +43,10 @@ async function writeIfMissing(path: string, content: string): Promise<void> {
  * 5 — Synthesize operation; concepts/ pages must cite >=2 projects.
  * 6 — concepts/ restricted to technical knowledge; person/process recurrences
  *     (which pass the two-project test trivially) go to personal/ or company/.
+ * 7 — the analyzer may ask the owner a question instead of guessing: the gap is
+ *     marked on the page and the question queued, never blocking the write.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export interface SchemaUpgrade {
   from: number;
@@ -121,7 +130,7 @@ export async function ensureHiveDir(): Promise<SchemaUpgrade | null> {
   return upgradeSchema(new Date().toISOString().replace(/[:.]/g, "-"));
 }
 
-const SCHEMA_CONTENT = `<!-- clauth-schema-version: 6 -->
+const SCHEMA_CONTENT = `<!-- clauth-schema-version: 7 -->
 # Hive Mind Wiki — Schema
 
 You are maintaining a personal knowledge wiki. This file governs how you read, write, and maintain every page in this wiki. Follow these conventions exactly.
@@ -370,6 +379,10 @@ knowledge no single project page can hold, because its value is the comparison.
      label; "mmiProductHUB single-table vs spinneys table-per-entity, because …"
      is knowledge. If you cannot state the difference or the shared lesson, do not
      write the page.
+   - **When you can see the difference but not its cause**, that reason usually
+     exists only in the owner's head. Write the page with what you can observe,
+     mark the gap, and put a question to the owner — see "Asking the owner a
+     question". Do not guess a rationale, and do not drop the page over it.
 5. Cross-link: from each project page the concept draws on, link back to the concept
    (the same bidirectional rule as ingest step 6).
 6. Do NOT invent patterns to fill the section. An empty \`concepts/\` is better than
@@ -377,6 +390,49 @@ knowledge no single project page can hold, because its value is the comparison.
 7. Update index.md, append a synthesis entry to log.md, and record provenance
    (source line \`… · synthesis\`) on every page you create or modify.
 8. **Print a summary** — \`HIVE_SUMMARY: <concepts created/updated, or "nothing to synthesize">\`
+
+## Asking the owner a question
+
+Some knowledge exists nowhere you can read it — only in the owner's head. The
+commonest case is synthesis: you can see *that* two projects solved the same
+problem differently, but the reason is not written down anywhere.
+
+You may put a question to the owner. The bar is deliberately high, because the
+asymmetry runs the wrong way: a question costs you nothing and costs them their
+attention. Ask only when **both** hold:
+
+- The answer cannot be derived from any wiki page, session log, or file you can read.
+- Knowing it would **change what you write** — not merely add colour to it.
+
+### A question never blocks
+
+Write the page anyway. Where the missing knowledge would have gone, mark the gap
+inline, on its own line:
+
+\`\`\`markdown
+> **Rationale unrecorded** — <the question, in full>
+\`\`\`
+
+That marker is what the answer replaces later, so phrase the question so it still
+makes sense to a reader months from now.
+
+### Recording the question
+
+Append **one line of JSON** to \`.questions-inbox.jsonl\` in the wiki root — create
+the file if it does not exist, and never rewrite or remove lines already in it:
+
+\`\`\`json
+{"question": "…", "page": "concepts/x.md", "why": "what you would write differently once you know"}
+\`\`\`
+
+Rules:
+- At most **${MAX_PER_RUN} questions per run**. If you have more, keep the ones whose answers change the most.
+- **Never re-ask.** Questions already put to the owner are listed in your prompt; a repeat, including one they declined to answer, teaches them to ignore the queue.
+- Ask about **rationale and intent** — "why did X diverge from Y", "which constraint drove this". Never ask something you could find by reading.
+- One question per line. Do not ask compound questions.
+
+The owner answers at their convenience via \`clauth hive --questions\`; their
+answers come back to you later as a separate ingest.
 
 ## Index maintenance — index.md
 
@@ -785,6 +841,78 @@ export async function resetHiveAll(): Promise<void> {
 export interface HiveAnalysisResult {
   summary: string | null;
   error: string | null;
+  /** Questions this run put to the owner. Empty unless it hit a gap only they can close. */
+  questions: Question[];
+}
+
+/**
+ * Where a run drops the questions it wants to ask. A file the analyzer appends
+ * to, rather than the queue itself: the queue is shared state with its own
+ * write discipline, and an LLM rewriting it wholesale could lose answers that
+ * are already in it. Lines are drained into the real queue after the run.
+ *
+ * Inside the wiki because that is the only directory the analyzer can write to.
+ * Dot-prefixed so it stays out of the wiki proper — Obsidian and the link check
+ * both skip it.
+ */
+const QUESTION_INBOX = join(HIVE_DIR, ".questions-inbox.jsonl");
+
+/**
+ * Read and clear the inbox. Tolerant on purpose: a malformed line is skipped
+ * rather than failing the drain, and a whole-file JSON array is accepted too,
+ * since that is the shape a model most often writes when told "JSON".
+ */
+async function drainQuestionInbox(): Promise<QuestionDraft[]> {
+  let raw: string;
+  try {
+    raw = await readFile(QUESTION_INBOX, "utf8");
+  } catch {
+    return [];
+  }
+  await unlink(QUESTION_INBOX).catch(() => {});
+
+  const drafts: QuestionDraft[] = [];
+  const take = (value: unknown) => {
+    if (value && typeof value === "object" && typeof (value as QuestionDraft).question === "string") {
+      drafts.push(value as QuestionDraft);
+    }
+  };
+
+  try {
+    const whole = JSON.parse(raw);
+    (Array.isArray(whole) ? whole : [whole]).forEach(take);
+    return drafts;
+  } catch {
+    // Not a single JSON document — the expected case, one object per line.
+  }
+
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      take(JSON.parse(line));
+    } catch {
+      continue;
+    }
+  }
+  return drafts;
+}
+
+/**
+ * Tell a knowledge-writing run how to ask, and what has already been asked.
+ * The rules live in the wiki's CLAUDE.md; this carries the two things that
+ * cannot be written there — the absolute inbox path and the current queue.
+ */
+async function questionInstruction(): Promise<string> {
+  const asked = await askedQuestionTexts();
+  const parts = [
+    `If you hit knowledge that exists only in the owner's head, follow the schema's "Asking the owner a question" section: write the page with the gap marked, and append one JSON line per question to ${QUESTION_INBOX}. Never block on a question, and never guess a rationale instead of asking.`,
+  ];
+  if (asked.length > 0) {
+    parts.push(
+      `Already put to the owner — do NOT ask these again, in any wording: ${asked.map((q) => `"${q}"`).join("; ")}.`
+    );
+  }
+  return parts.join(" ");
 }
 
 export type HiveStreamEvent =
@@ -860,13 +988,32 @@ function handleStreamLine(line: string, onEvent: HiveOnEvent): void {
   }
 }
 
-function spawnHiveSession(
+/**
+ * Run one headless claude session against the wiki, then collect any questions
+ * it left in the inbox. Every operation drains the inbox, not just the ones told
+ * how to ask — the rule lives in the wiki's schema, so any run can reach it, and
+ * a question left behind would otherwise be credited to whichever run came next.
+ */
+async function spawnHiveSession(
+  prompt: string,
+  extraAddDirs: string[],
+  claudeConfigDir: string,
+  profileName: string,
+  onEvent?: HiveOnEvent,
+  source = "hive"
+): Promise<HiveAnalysisResult> {
+  const result = await runClaudeSession(prompt, extraAddDirs, claudeConfigDir, profileName, onEvent);
+  const questions = await addQuestions(await drainQuestionInbox(), source);
+  return { ...result, questions };
+}
+
+function runClaudeSession(
   prompt: string,
   extraAddDirs: string[],
   claudeConfigDir: string,
   profileName: string,
   onEvent?: HiveOnEvent
-): Promise<HiveAnalysisResult> {
+): Promise<{ summary: string | null; error: string | null }> {
   return new Promise((resolve) => {
     // Pass prompt via stdin (not as positional arg) because --add-dir is
     // variadic in claude CLI and would consume the prompt as a directory.
@@ -966,12 +1113,14 @@ function provenanceLine(
     | { kind: "file"; ref: string }
     | { kind: "manual" }
     | { kind: "synthesis" }
+    | { kind: "answer" }
 ): string {
   const today = new Date().toISOString().slice(0, 10);
   const what =
     source.kind === "session" ? `session ${source.ref}`
     : source.kind === "file" ? `file ${source.ref}`
     : source.kind === "synthesis" ? "synthesis"
+    : source.kind === "answer" ? "answered question"
     : "manual input";
   return `${today} · ${what}`;
 }
@@ -981,7 +1130,7 @@ function provenanceInstruction(line: string): string {
   return `Provenance: the source of this ingest is "${line}". Per the schema's Sources rule, add this exact line to the ## Sources section of every page you create or modify, and never remove source lines already there.`;
 }
 
-export function runHiveAnalysis(
+export async function runHiveAnalysis(
   logPath: string,
   projectName: string,
   claudeConfigDir: string,
@@ -995,13 +1144,14 @@ export function runHiveAnalysis(
     `Read the session log from disk. Focus on decisions, problems, tradeoffs, architecture, and context.`,
     `Skip trivial operations and raw tool outputs.`,
     provenanceInstruction(provenanceLine({ kind: "session", ref: sessionId })),
+    await questionInstruction(),
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [dirname(logPath)], claudeConfigDir, profileName, onEvent);
+  return spawnHiveSession(prompt, [dirname(logPath)], claudeConfigDir, profileName, onEvent, "session");
 }
 
-export function runHiveManual(
+export async function runHiveManual(
   userPrompt: string,
   claudeConfigDir: string,
   profileName: string,
@@ -1012,10 +1162,11 @@ export function runHiveManual(
     `Process the following input and upsert accordingly:`,
     userPrompt,
     provenanceInstruction(provenanceLine({ kind: "manual" })),
+    await questionInstruction(),
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent, "manual");
 }
 
 export function runHiveQuery(
@@ -1032,7 +1183,7 @@ export function runHiveQuery(
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent, "query");
 }
 
 export function runHiveLint(
@@ -1048,7 +1199,7 @@ export function runHiveLint(
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent, "lint");
 }
 
 // --- session listing (for the picker) ---
@@ -1527,11 +1678,13 @@ export async function runHiveSynthesize(
     `Find patterns that genuinely recur across two or more projects and write them as concepts/ pages, citing the project pages as evidence.`,
     `Every concept page MUST link to at least two existing project pages; this is verified in code afterwards and violations are reported.`,
     `Do not invent patterns to fill the section — if nothing recurs, write nothing.`,
+    `Where two projects clearly diverged but the reason is written down nowhere, that reason is the knowledge worth having and only the owner has it: write the page with the gap marked and ask, per the schema. Never guess a rationale.`,
     provenanceInstruction(provenanceLine({ kind: "synthesis" })),
+    await questionInstruction(),
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
-  const result = await spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
+  const result = await spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent, "synthesis");
 
   const projects = new Set(await listHiveProjects());
   const concepts: { page: string; projects: string[] }[] = [];
@@ -1546,7 +1699,7 @@ export async function runHiveSynthesize(
   return { ...result, concepts, underCited, backupDir };
 }
 
-export function runHiveFileIngest(
+export async function runHiveFileIngest(
   filePath: string,
   focusPrompt: string | undefined,
   claudeConfigDir: string,
@@ -1562,9 +1715,48 @@ export function runHiveFileIngest(
   }
   parts.push(`Upsert into the wiki, update index, append to log.`);
   parts.push(provenanceInstruction(provenanceLine({ kind: "file", ref: basename(filePath) })));
+  parts.push(await questionInstruction());
   parts.push(`When done, print a HIVE_SUMMARY line as described in the schema.`);
 
-  return spawnHiveSession(parts.join(" "), [dirname(filePath)], claudeConfigDir, profileName, onEvent);
+  return spawnHiveSession(parts.join(" "), [dirname(filePath)], claudeConfigDir, profileName, onEvent, "file");
+}
+
+/**
+ * Fold the owner's answers back into the wiki.
+ *
+ * Batched into a single run on purpose: each run re-reads the schema and the
+ * pages it touches, so answering five questions one at a time costs five times
+ * as much for the same edit. Answers arrive as knowledge, not as a transcript —
+ * the question was scaffolding for getting it, and does not belong on the page.
+ */
+export function runHiveAnswers(
+  answered: Question[],
+  claudeConfigDir: string,
+  profileName: string,
+  onEvent?: HiveOnEvent
+): Promise<HiveAnalysisResult> {
+  const items = answered.map((q, i) =>
+    [
+      `${i + 1}. page: ${q.page ?? "(not recorded — find where it belongs)"}`,
+      `   question asked: ${q.question}`,
+      `   owner's answer: ${q.answer ?? ""}`,
+    ].join("\n")
+  );
+
+  const prompt = [
+    `You are maintaining the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
+    `The owner has answered questions the wiki previously recorded as unanswered. Fold each answer into the wiki:`,
+    `On the named page, find the gap marker (a line beginning "> **Rationale unrecorded**") that matches the question and REPLACE it with the knowledge the answer gives, written as prose in the page's own voice.`,
+    `Write it as established knowledge — do not quote the question, do not write "the owner said", and do not leave the marker in place.`,
+    `If the marker is no longer there, or no page was recorded, work out where the knowledge belongs and add it there.`,
+    `Treat the answer as authoritative: where it contradicts what a page claims, correct the page and note what changed.`,
+    `Update index.md if a page's scope changed, and append a log entry.`,
+    provenanceInstruction(provenanceLine({ kind: "answer" })),
+    `Here are the answered questions:\n${items.join("\n")}`,
+    `When done, print a HIVE_SUMMARY line as described in the schema.`,
+  ].join(" ");
+
+  return spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent, "answers");
 }
 
 // --- cross-session context injection ---
