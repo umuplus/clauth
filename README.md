@@ -174,6 +174,7 @@ clauth hive --queue --clear-failed      # drop them
 # Maintenance
 clauth hive --backfill-summaries        # fill in the summary field on every page
 clauth hive --synthesize                # extract cross-project patterns into concepts/
+clauth hive --links                     # check the link graph (exits 1 on broken links)
 clauth hive --usage                     # are sessions actually opening wiki pages?
 ```
 

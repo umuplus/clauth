@@ -1,4 +1,4 @@
-import { join, basename, dirname, resolve, sep } from "node:path";
+import { join, basename, dirname, resolve, relative, sep } from "node:path";
 import { mkdir, access, writeFile, readFile, readdir, stat, rm, cp, open } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { getClauthDir } from "./profiles.js";
@@ -1164,6 +1164,106 @@ export async function listRecentSessions(
     });
   }
   return out;
+}
+
+// --- link graph ---
+
+export interface LinkReport {
+  pages: number;
+  /** Links whose target does not exist — always a defect. */
+  broken: { from: string; to: string }[];
+  /**
+   * A links to B across a category or project boundary, but B does not link back.
+   * Links within one project are excluded — the schema asks for bidirectional
+   * links between *related entities*, not for every internal navigation link.
+   */
+  oneWay: { from: string; to: string }[];
+  /** Pages nothing links to. Reachable only by knowing they exist. */
+  orphans: string[];
+}
+
+/** Every content page, wiki-relative. CLAUDE.md/index.md/log.md are not pages. */
+async function listContentPages(): Promise<string[]> {
+  const out: string[] = [];
+  for (const category of HIVE_CATEGORIES) {
+    const root = join(HIVE_DIR, category);
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) out.push(`${category}/${entry.name}`);
+      else if (entry.isDirectory()) {
+        try {
+          for (const file of await readdir(join(root, entry.name))) {
+            if (file.endsWith(".md")) out.push(`${category}/${entry.name}/${file}`);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * Check the wiki's link graph — deterministic, no LLM.
+ *
+ * Moving or deleting a page silently breaks every link into it, and the damage
+ * is invisible until someone follows one. `--lint` can find this too, but it
+ * costs a model call and its answer is not reproducible; this is cheap enough to
+ * run after any edit. It also measures how often links run in only one
+ * direction, which is the signal for whether the schema's cross-linking step is
+ * actually being followed.
+ */
+export async function analyzeLinks(): Promise<LinkReport> {
+  const pages = await listContentPages();
+  const known = new Set(pages);
+  const outbound = new Map<string, Set<string>>();
+
+  for (const page of pages) {
+    const content = await readPage(join(HIVE_DIR, page));
+    const targets = new Set<string>();
+    if (content !== null) {
+      for (const m of content.matchAll(/\]\(([^)#]+\.md)(?:#[^)]*)?\)/g)) {
+        const raw = m[1];
+        if (/^[a-z]+:\/\//i.test(raw)) continue;
+        // Resolve relative to the linking page, then express wiki-relative again.
+        const abs = resolve(HIVE_DIR, dirname(page), raw);
+        targets.add(relative(HIVE_DIR, abs).split(sep).join("/"));
+      }
+    }
+    outbound.set(page, targets);
+  }
+
+  /** The unit a backlink is expected across: a whole project, or a flat category. */
+  const group = (page: string) => page.split("/").slice(0, page.startsWith("projects/") ? 2 : 1).join("/");
+
+  const broken: { from: string; to: string }[] = [];
+  const oneWay: { from: string; to: string }[] = [];
+  const linkedTo = new Set<string>();
+
+  for (const [page, targets] of outbound) {
+    for (const target of targets) {
+      if (!known.has(target)) {
+        broken.push({ from: page, to: target });
+        continue;
+      }
+      linkedTo.add(target);
+      if (group(page) === group(target)) continue; // internal navigation, not a relationship
+      if (!outbound.get(target)?.has(page)) oneWay.push({ from: page, to: target });
+    }
+  }
+
+  return {
+    pages: pages.length,
+    broken,
+    oneWay,
+    orphans: pages.filter((p) => !linkedTo.has(p)),
+  };
 }
 
 // --- usage measurement ---

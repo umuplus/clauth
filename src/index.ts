@@ -68,6 +68,7 @@ import {
   runHiveBackfillSummaries,
   runHiveSynthesize,
   computeHiveUsage,
+  analyzeLinks,
   listRecentSessions,
   FLAT_CATEGORIES,
   type HiveCategory,
@@ -412,6 +413,7 @@ program
   .option("--reset [target]", "Delete a project, a <category>/<page>, or the entire wiki if no target is given")
   .option("--backfill-summaries", "Fill in the summary frontmatter field across every wiki page")
   .option("--synthesize", "Extract cross-project patterns into concepts/ pages")
+  .option("--links", "Check the wiki link graph: broken links, one-way pairs, orphans")
   .option("--usage", "Show whether sessions actually open the wiki pages they are pointed at")
   .option("--queue", "Show sessions waiting to be analysed")
   .option("--catchup", "Analyse queued sessions now")
@@ -423,7 +425,7 @@ program
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
     index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
-    reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; synthesize?: boolean; usage?: boolean;
+    reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; synthesize?: boolean; links?: boolean; usage?: boolean;
     queue?: boolean; catchup?: boolean; sessions?: string | boolean; retryFailed?: boolean; clearFailed?: boolean; quiet?: boolean;
   }) => {
     try {
@@ -703,6 +705,41 @@ program
           console.log(chalk.dim("\n  Retry: clauth hive --queue --retry-failed"));
           console.log(chalk.dim("  Drop:  clauth hive --queue --clear-failed\n"));
         }
+        return;
+      }
+
+      if (opts.links) {
+        const r = await analyzeLinks();
+
+        console.log(chalk.bold(`\n  Link check — ${r.pages} pages\n`));
+
+        if (r.broken.length === 0 && r.oneWay.length === 0 && r.orphans.length === 0) {
+          console.log(chalk.green("  Clean: no broken links, no one-way pairs, no orphans.\n"));
+          return;
+        }
+
+        if (r.broken.length > 0) {
+          console.log(chalk.red(`  Broken links (${r.broken.length}) — the target does not exist`));
+          r.broken.forEach((b) => console.log(chalk.red(`    ${b.from} → ${b.to}`)));
+          console.log(chalk.dim("  Usually left behind by a page that was moved or reset.\n"));
+        }
+
+        if (r.oneWay.length > 0) {
+          console.log(chalk.yellow(`  One-way links (${r.oneWay.length}) — no link back`));
+          r.oneWay.slice(0, 20).forEach((o) => console.log(chalk.dim(`    ${o.from} → ${o.to}`)));
+          if (r.oneWay.length > 20) console.log(chalk.dim(`    … and ${r.oneWay.length - 20} more`));
+          console.log(chalk.dim("  The schema asks for both directions; a missing backlink means the\n  page is invisible from the other side.\n"));
+        }
+
+        if (r.orphans.length > 0) {
+          console.log(chalk.yellow(`  Orphan pages (${r.orphans.length}) — nothing links to them`));
+          r.orphans.forEach((o) => console.log(chalk.dim(`    ${o}`)));
+          console.log();
+        }
+
+        // Broken links are a defect; the rest is advisory. Exit code lets this
+        // be used as a check after edits without reading the output.
+        if (r.broken.length > 0) process.exit(1);
         return;
       }
 
