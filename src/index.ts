@@ -65,6 +65,7 @@ import {
   resetHivePage,
   resetHiveAll,
   runHiveBackfillSummaries,
+  runHiveSynthesize,
   computeHiveUsage,
   listRecentSessions,
   FLAT_CATEGORIES,
@@ -409,6 +410,7 @@ program
   .option("--obsidian", "Open the wiki in Obsidian (requires Obsidian 1.0+)")
   .option("--reset [target]", "Delete a project, a <category>/<page>, or the entire wiki if no target is given")
   .option("--backfill-summaries", "Fill in the summary frontmatter field across every wiki page")
+  .option("--synthesize", "Extract cross-project patterns into concepts/ pages")
   .option("--usage", "Show whether sessions actually open the wiki pages they are pointed at")
   .option("--queue", "Show sessions waiting to be analysed")
   .option("--catchup", "Analyse queued sessions now")
@@ -420,7 +422,7 @@ program
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
     index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
-    reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; usage?: boolean;
+    reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; synthesize?: boolean; usage?: boolean;
     queue?: boolean; catchup?: boolean; sessions?: string | boolean; retryFailed?: boolean; clearFailed?: boolean; quiet?: boolean;
   }) => {
     try {
@@ -786,6 +788,42 @@ program
           console.log(chalk.dim("  Verified: only frontmatter changed."));
           console.log(chalk.dim(`  Backup: ${res.backupDir}`));
         }
+        return;
+      }
+
+      if (opts.synthesize) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        console.log(chalk.dim("  hive: backing up wiki and synthesizing cross-project concepts..."));
+        const res = await runHiveSynthesize(claudeDir, profileName, stamp, (ev) => {
+          if (ev.kind === "tool") {
+            console.log(chalk.dim(ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`));
+          }
+        });
+
+        if (res.error) {
+          console.log(chalk.red("  hive: synthesis failed"));
+          console.log(chalk.red(res.error));
+          console.log(chalk.dim(`  Backup: ${res.backupDir}`));
+          return;
+        }
+
+        console.log(chalk.dim(`  hive: ${res.summary ?? "done"}`));
+
+        if (res.concepts.length === 0) {
+          console.log(chalk.dim("  No concept pages — nothing recurred across projects."));
+        } else {
+          console.log(chalk.bold(`\n  Concept pages (${res.concepts.length})`));
+          res.concepts.forEach((c) =>
+            console.log(`    ${c.projects.length >= 2 ? chalk.green("✓") : chalk.red("✗")} ${c.page} ${chalk.dim(`← ${c.projects.join(", ") || "no projects"}`)}`)
+          );
+        }
+
+        if (res.underCited.length > 0) {
+          console.log(chalk.yellow(`\n  ⚠ ${res.underCited.length} concept page(s) cite fewer than two projects — the synthesis rule was not met:`));
+          res.underCited.forEach((p) => console.log(chalk.yellow(`    ${p}`)));
+          console.log(chalk.dim("  Review these; they may be a single-project note that belongs on the project page instead."));
+        }
+        console.log(chalk.dim(`\n  Backup: ${res.backupDir}`));
         return;
       }
 

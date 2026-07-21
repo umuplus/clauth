@@ -31,8 +31,11 @@ async function writeIfMissing(path: string, content: string): Promise<void> {
  * 2 — `summary` frontmatter field; the injected context became a map built from it.
  * 3 — cross-linking promoted from a convention to a numbered ingest step, after
  *     measurement showed backlinks were written in only one direction.
+ * 4 — `## Sources` provenance section; each ingest records its origin on every
+ *     page it touches, so a wrong claim can be traced to its source.
+ * 5 — Synthesize operation; concepts/ pages must cite >=2 projects.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 5;
 
 export interface SchemaUpgrade {
   from: number;
@@ -116,7 +119,7 @@ export async function ensureHiveDir(): Promise<SchemaUpgrade | null> {
   return upgradeSchema(new Date().toISOString().replace(/[:.]/g, "-"));
 }
 
-const SCHEMA_CONTENT = `<!-- clauth-schema-version: 3 -->
+const SCHEMA_CONTENT = `<!-- clauth-schema-version: 5 -->
 # Hive Mind Wiki — Schema
 
 You are maintaining a personal knowledge wiki. This file governs how you read, write, and maintain every page in this wiki. Follow these conventions exactly.
@@ -197,6 +200,11 @@ Content organized under clear headings. Use concise prose.
 ## See also
 
 - [Related Page](../path/to/page.md)
+
+## Sources
+
+- 2026-01-15 · session a1b2c3d4-...
+- 2026-01-20 · manual input
 \`\`\`
 
 Rules:
@@ -221,6 +229,22 @@ and injects that map instead of the page bodies. Everything else is read on dema
 - Name what *kind* of knowledge lives here, so a reader can tell whether it is
   relevant to the task in front of them.
 - Update it when the page's scope changes — not on every content edit.
+
+### The \`## Sources\` section — provenance
+
+Every page ends with a \`## Sources\` section recording where its knowledge came
+from. This is what lets a wrong claim be traced back: if a fact turns out to be
+mistaken, its source line points at the exact session (or manual input) that
+introduced it, so the other claims from that same source can be re-checked too.
+
+- Each ingest is given its own source line (a date plus a session id, a file
+  name, or "manual input"). Add that exact line to the \`## Sources\` section of
+  **every page you create or touch** during the ingest.
+- **Append only — never delete or rewrite existing source lines.** A page
+  accumulates the full list of sources that shaped it over time.
+- If the ingest's source line is already present on a page (you edited it twice
+  in one run), do not add a duplicate.
+- Order oldest-first. Keep it to one line per source; no prose.
 
 ## Operations
 
@@ -313,6 +337,38 @@ When health-checking the wiki (invoked with \`clauth hive --lint\`):
 4. Report what you found and what you fixed.
 5. Append a lint entry to log.md.
 6. **Print a summary** — as your final output, print: \`HIVE_SUMMARY: <what you found and fixed>\`
+
+### Synthesize
+
+When synthesizing (invoked with \`clauth hive --synthesize\`):
+
+The goal is to fill \`concepts/\` with knowledge that lives *between* projects —
+patterns, tools, or approaches that recur across two or more of them. This is
+knowledge no single project page can hold, because its value is the comparison.
+
+1. Read the knowledge map and index.md to see what projects exist and what each holds.
+2. Read the existing \`concepts/\` pages first, so you update rather than duplicate.
+3. Look for a technique, library, pattern, or decision that appears in **two or
+   more projects**. Open the relevant project pages to confirm it genuinely recurs.
+4. For each real recurrence, create or update a \`concepts/<name>.md\` page. **Hard rules:**
+   - **It must involve at least two projects.** Something in one project belongs on
+     that project's page, not here. A concept page that cites fewer than two
+     projects is invalid and will be flagged.
+   - **Cite the evidence.** Link to the specific project pages the pattern is drawn
+     from. These links are how the claim is checked.
+   - **The difference is the content.** If two projects did the same thing
+     differently, the valuable knowledge is *why they diverged* and *what each
+     chose* — not merely that both use the technique. "Both use DynamoDB" is a
+     label; "mmiProductHUB single-table vs spinneys table-per-entity, because …"
+     is knowledge. If you cannot state the difference or the shared lesson, do not
+     write the page.
+5. Cross-link: from each project page the concept draws on, link back to the concept
+   (the same bidirectional rule as ingest step 6).
+6. Do NOT invent patterns to fill the section. An empty \`concepts/\` is better than
+   a padded one. If nothing genuinely recurs across projects, write nothing.
+7. Update index.md, append a synthesis entry to log.md, and record provenance
+   (source line \`… · synthesis\`) on every page you create or modify.
+8. **Print a summary** — \`HIVE_SUMMARY: <concepts created/updated, or "nothing to synthesize">\`
 
 ## Index maintenance — index.md
 
@@ -891,6 +947,32 @@ function spawnHiveSession(
   });
 }
 
+/**
+ * A provenance line identifying where an ingest's knowledge came from, so a
+ * claim can later be traced to its origin. The session id is the log's own file
+ * name — stable, and the log stays on disk to be re-read if a claim turns out wrong.
+ */
+function provenanceLine(
+  source:
+    | { kind: "session"; ref: string }
+    | { kind: "file"; ref: string }
+    | { kind: "manual" }
+    | { kind: "synthesis" }
+): string {
+  const today = new Date().toISOString().slice(0, 10);
+  const what =
+    source.kind === "session" ? `session ${source.ref}`
+    : source.kind === "file" ? `file ${source.ref}`
+    : source.kind === "synthesis" ? "synthesis"
+    : "manual input";
+  return `${today} · ${what}`;
+}
+
+/** Instruction appended to every knowledge-writing ingest so pages record their origin. */
+function provenanceInstruction(line: string): string {
+  return `Provenance: the source of this ingest is "${line}". Per the schema's Sources rule, add this exact line to the ## Sources section of every page you create or modify, and never remove source lines already there.`;
+}
+
 export function runHiveAnalysis(
   logPath: string,
   projectName: string,
@@ -898,11 +980,13 @@ export function runHiveAnalysis(
   profileName: string,
   onEvent?: HiveOnEvent
 ): Promise<HiveAnalysisResult> {
+  const sessionId = basename(logPath).replace(/\.jsonl$/, "");
   const prompt = [
     `Analyze the Claude Code session log at ${logPath} for project "${projectName}".`,
     `Extract knowledge and upsert into the wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
     `Read the session log from disk. Focus on decisions, problems, tradeoffs, architecture, and context.`,
     `Skip trivial operations and raw tool outputs.`,
+    provenanceInstruction(provenanceLine({ kind: "session", ref: sessionId })),
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
@@ -919,6 +1003,7 @@ export function runHiveManual(
     `You are maintaining the knowledge wiki at ${HIVE_DIR}/ following the schema in CLAUDE.md.`,
     `Process the following input and upsert accordingly:`,
     userPrompt,
+    provenanceInstruction(provenanceLine({ kind: "manual" })),
     `When done, print a HIVE_SUMMARY line as described in the schema.`,
   ].join(" ");
 
@@ -1289,6 +1374,70 @@ export async function runHiveBackfillSummaries(
   return { ...result, bodiesChanged, backupDir };
 }
 
+export interface HiveSynthesisResult extends HiveAnalysisResult {
+  /** concepts/ pages after the run, each with the distinct projects it links to. */
+  concepts: { page: string; projects: string[] }[];
+  /** Concept pages citing fewer than two real projects — a violation of the synthesis rule. */
+  underCited: string[];
+  backupDir: string;
+}
+
+/** Distinct project names a page links into (`projects/<name>/...`). */
+function projectsLinkedFrom(content: string): string[] {
+  const out = new Set<string>();
+  for (const m of content.matchAll(/\]\(([^)]+)\)/g)) {
+    const target = m[1].replace(/^(\.\.\/)+/, "").replace(/^\.\//, "");
+    const mm = target.match(/^projects\/([^/]+)\//);
+    if (mm) out.add(mm[1]);
+  }
+  return [...out];
+}
+
+/**
+ * Fill concepts/ with cross-project knowledge.
+ *
+ * Backs the wiki up first (it edits pages, and the wiki is not version-controlled),
+ * then verifies in code the one rule that must hold: every concept page cites at
+ * least two *existing* projects. The LLM is told this, but "involves two projects"
+ * is exactly the claim it is most tempted to fudge to fill the section, so it is
+ * checked rather than trusted.
+ */
+export async function runHiveSynthesize(
+  claudeConfigDir: string,
+  profileName: string,
+  stamp: string,
+  onEvent?: HiveOnEvent
+): Promise<HiveSynthesisResult> {
+  const backupDir = join(BACKUP_DIR, stamp);
+  await mkdir(BACKUP_DIR, { recursive: true });
+  await cp(HIVE_DIR, backupDir, { recursive: true });
+  await pruneBackups();
+
+  const prompt = [
+    `You are synthesizing cross-project knowledge in the wiki at ${HIVE_DIR}/.`,
+    `Read CLAUDE.md there first — follow the "Synthesize" operation exactly.`,
+    `Find patterns that genuinely recur across two or more projects and write them as concepts/ pages, citing the project pages as evidence.`,
+    `Every concept page MUST link to at least two existing project pages; this is verified in code afterwards and violations are reported.`,
+    `Do not invent patterns to fill the section — if nothing recurs, write nothing.`,
+    provenanceInstruction(provenanceLine({ kind: "synthesis" })),
+    `When done, print a HIVE_SUMMARY line as described in the schema.`,
+  ].join(" ");
+
+  const result = await spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
+
+  const projects = new Set(await listHiveProjects());
+  const concepts: { page: string; projects: string[] }[] = [];
+  for (const name of await listHivePages("concepts")) {
+    const content = await readPage(join(HIVE_DIR, "concepts", `${name}.md`));
+    if (content === null) continue;
+    const cited = projectsLinkedFrom(content).filter((p) => projects.has(p));
+    concepts.push({ page: `concepts/${name}.md`, projects: cited });
+  }
+  const underCited = concepts.filter((c) => c.projects.length < 2).map((c) => c.page);
+
+  return { ...result, concepts, underCited, backupDir };
+}
+
 export function runHiveFileIngest(
   filePath: string,
   focusPrompt: string | undefined,
@@ -1304,6 +1453,7 @@ export function runHiveFileIngest(
     parts.push(`Focus on: ${focusPrompt}`);
   }
   parts.push(`Upsert into the wiki, update index, append to log.`);
+  parts.push(provenanceInstruction(provenanceLine({ kind: "file", ref: basename(filePath) })));
   parts.push(`When done, print a HIVE_SUMMARY line as described in the schema.`);
 
   return spawnHiveSession(parts.join(" "), [dirname(filePath)], claudeConfigDir, profileName, onEvent);
