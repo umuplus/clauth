@@ -139,12 +139,6 @@ export const api = {
     ),
   lintHive: (onProgress?: (ev: HiveStreamEvent) => void) =>
     streamHive("/api/hive/lint", { method: "POST" }, onProgress),
-  backfillSummaries: (onProgress?: (ev: HiveStreamEvent) => void) =>
-    streamHive<HiveBackfillResult>(
-      "/api/hive/backfill-summaries",
-      { method: "POST" },
-      onProgress
-    ),
   uploadFile: (
     file: File,
     focus?: string,

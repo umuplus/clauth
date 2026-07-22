@@ -34,12 +34,6 @@ export interface HiveResult {
   error: string | null;
 }
 
-export interface HiveBackfillResult extends HiveResult {
-  /** Pages whose prose changed — backfill should only touch frontmatter, so any entry is a fault. */
-  bodiesChanged: string[];
-  backupDir: string;
-}
-
 export interface QueueItem {
   logPath: string;
   project: string;

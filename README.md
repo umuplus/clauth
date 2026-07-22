@@ -176,11 +176,11 @@ clauth hive --questions                 # answer them (Enter skips, d dismisses,
 clauth hive --questions --clear         # dismiss all open questions
 
 # Maintenance
-clauth hive --backfill-summaries        # fill in the summary field on every page
 clauth hive --synthesize                # extract cross-project patterns into concepts/
-clauth hive --links                     # check the link graph (exits 1 on broken links)
-clauth hive --usage                     # are sessions actually opening wiki pages?
+clauth hive --lint                      # find contradictions, stale claims, broken links
 ```
+
+You are not expected to remember when to run these two. clauth watches for the moments they matter and tells you at launch — see [When clauth asks for you](#when-clauth-asks-for-you).
 
 ## Hive Mind
 
@@ -241,13 +241,27 @@ Page contents are **not** injected. The session starts knowing where things are,
 
 This keeps the cost of a session flat as the wiki grows. On a 9-page project, the old approach injected ~18,000 tokens of prior context into every session before you typed anything; the map is ~500 and capped, no matter how large the wiki gets.
 
-The map is built from each page's `summary` frontmatter field — deterministically, in code, with no LLM call. If you have pages from before that field existed, fill them in once:
+The map is built from each page's `summary` frontmatter field — deterministically, in code, with no LLM call. The schema makes that field mandatory, so the analyzer fills it in as it writes.
 
-```bash
-clauth hive --backfill-summaries
+### When clauth asks for you
+
+A wiki you never open cannot tell you it needs something. Maintenance commands that only run when you remember they exist are maintenance commands that never run — so clauth watches for the moments that matter and surfaces them at launch, the one screen you see every time:
+
+```
+  ╭──────────────────╮
+  │  ▶ work          │
+  │  hive-mind · 2 questions │
+  ╰──────────────────╯
+  clauth hive --synthesize  — 2 projects, concepts/ still empty
 ```
 
-That copies the wiki to `~/.clauth/hive-backups/` first, and verifies afterwards that only frontmatter changed.
+Three signals, all computed from files with no LLM call:
+
+- **Open questions** appear as a count, answered with `clauth hive --questions`.
+- **`--synthesize` is offered** the moment you have two or more projects and `concepts/` is still empty — the cross-project knowledge is the point of the wiki, and nothing else would tell you the threshold was crossed. It goes quiet as soon as `concepts/` has anything.
+- **Broken links are reported** when a page has been moved, split, or deleted out from under the links pointing at it. `clauth hive --reset` also checks immediately, since deleting a project is what most often breaks them — every `concepts/` page cites at least two projects by rule, so removing one project can dangle all of them at once.
+
+Nothing here nags: each signal is silent unless it is true, and the synthesis one stops for good once acted on.
 
 ### When the wiki asks you something
 

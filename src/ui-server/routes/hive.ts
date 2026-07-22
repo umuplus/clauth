@@ -9,7 +9,6 @@ import {
   runHiveQuery,
   runHiveLint,
   runHiveFileIngest,
-  runHiveBackfillSummaries,
   listHiveProjects,
   listHivePages,
   resetHiveProject,
@@ -274,18 +273,6 @@ hiveRoutes.post("/query", async (c) => {
 
   return streamRun(c, (onEvent) =>
     runHiveQuery(prompt, profile.dir, profile.name, onEvent)
-  );
-});
-
-hiveRoutes.post("/backfill-summaries", async (c) => {
-  const profile = await resolveProfile();
-  if (!profile) {
-    return c.json({ error: "no profile found" }, 400);
-  }
-
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return streamRun(c, (onEvent) =>
-    runHiveBackfillSummaries(profile.dir, profile.name, stamp, onEvent)
   );
 });
 

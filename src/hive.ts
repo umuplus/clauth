@@ -1417,220 +1417,52 @@ export async function analyzeLinks(): Promise<LinkReport> {
   };
 }
 
-// --- usage measurement ---
+// --- launch-time nudges ---
 
-export interface HiveUsage {
-  /** Sessions in a project that has wiki pages — i.e. a map was almost certainly injected. */
-  sessionsWithMap: number;
-  /** Of those, how many opened at least one wiki page. */
-  sessionsThatRead: number;
-  /** Page path → how many distinct sessions opened it. */
-  pageHits: Record<string, number>;
-  /** Pages that exist but were never opened in the scanned window. */
-  neverRead: string[];
-  scannedSessions: number;
-  since: string | null;
+/** Something worth the user's attention, and the command that acts on it. */
+export interface HiveNudge {
+  reason: string;
+  command: string;
 }
 
 /**
- * Does a tool call touch the wiki? Read/Edit expose a path directly; Grep and
- * Glob may scope by path; Bash can reach it inside an arbitrary command, so that
- * one is matched on the command text — undercounting it would bias the result
- * toward "the map is ignored", which is the conclusion we most want to avoid
- * reaching by accident.
- */
-function hivePathsInToolUse(name: string, input: Record<string, unknown>): string[] {
-  const candidates: string[] = [];
-  for (const key of ["file_path", "path", "notebook_path"]) {
-    const v = input[key];
-    if (typeof v === "string") candidates.push(v);
-  }
-  if (name === "Bash" && typeof input.command === "string") {
-    for (const m of input.command.matchAll(/[^\s"']*\.clauth\/hive\/[^\s"';|&]*/g)) {
-      candidates.push(m[0]);
-    }
-  }
-  return candidates.filter((p) => p.includes(`${sep}.clauth${sep}hive${sep}`) || p.includes("/.clauth/hive/"));
-}
-
-/** Normalise an absolute wiki path to a wiki-relative page path. */
-function toWikiRelative(p: string): string | null {
-  const idx = p.indexOf(".clauth/hive/");
-  if (idx === -1) return null;
-  const rel = p.slice(idx + ".clauth/hive/".length).replace(/[)"',;]+$/, "");
-  return rel.endsWith(".md") ? rel : null;
-}
-
-async function scanSessionLog(
-  filePath: string
-): Promise<{ project: string | null; pages: Set<string>; touchedHive: boolean; lastTs: string | null } | null> {
-  let content: string;
-  try {
-    content = await readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-
-  let project: string | null = null;
-  let lastTs: string | null = null;
-  let touchedHive = false;
-  const pages = new Set<string>();
-
-  for (const line of content.split("\n")) {
-    if (!line.trim()) continue;
-    let d: any;
-    try {
-      d = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
-    if (!project && typeof d.cwd === "string") project = basename(d.cwd);
-    if (typeof d.timestamp === "string") lastTs = d.timestamp;
-
-    const blocks = d?.message?.content;
-    if (!Array.isArray(blocks)) continue;
-    for (const b of blocks) {
-      if (b?.type !== "tool_use" || typeof b.name !== "string") continue;
-      for (const p of hivePathsInToolUse(b.name, b.input ?? {})) {
-        touchedHive = true;
-        const rel = toWikiRelative(p);
-        if (rel) pages.add(rel);
-      }
-    }
-  }
-
-  return { project, pages, touchedHive, lastTs };
-}
-
-/**
- * Measure whether injected maps are actually followed.
+ * What the wiki needs, computed at launch.
  *
- * The denominator is approximate on purpose: a session counts as "had a map" if
- * its project has wiki pages *now*, since logs do not record the injected system
- * prompt. That misattributes sessions from before a project's pages existed, which
- * is acceptable while the question is "is this zero or not" rather than a precise rate.
+ * The launch banner is the only surface every user sees every time, so anything
+ * that needs a human has to arrive there. The alternative is what clauth had
+ * before: maintenance commands that only ever run if you happen to remember
+ * they exist — which, for a wiki you never open, means never. Both checks are
+ * deterministic file reads; neither costs an LLM call.
  */
-export async function computeHiveUsage(claudeConfigDirs: string[]): Promise<HiveUsage> {
-  const projectsWithPages = new Set(await listHiveProjects());
-  const realFiles = new Set([
-    ...(await listAllPages()),
-    "CLAUDE.md", "index.md", "log.md",
-  ]);
-  const pageHits: Record<string, number> = {};
-  let sessionsWithMap = 0;
-  let sessionsThatRead = 0;
-  let scannedSessions = 0;
-  let since: string | null = null;
+export async function getHiveNudges(): Promise<HiveNudge[]> {
+  const projects = await listHiveProjects();
+  if (projects.length === 0) return [];
 
-  for (const configDir of claudeConfigDirs) {
-    for (const filePath of (await snapshotSessionFiles(configDir)).keys()) {
-      const scan = await scanSessionLog(filePath);
-      if (!scan) continue;
-      scannedSessions++;
-      if (scan.lastTs && (!since || scan.lastTs < since)) since = scan.lastTs;
+  const nudges: HiveNudge[] = [];
 
-      if (!scan.project || !projectsWithPages.has(scan.project)) continue;
-      sessionsWithMap++;
-      if (scan.touchedHive) sessionsThatRead++;
-      for (const page of scan.pages) {
-        if (realFiles.has(page)) pageHits[page] = (pageHits[page] ?? 0) + 1;
-      }
-    }
+  // Cross-project knowledge is the wiki's whole point, and nothing else tells
+  // you the threshold has been crossed. Silent once concepts/ has anything —
+  // a nudge that never stops is a nudge you stop reading.
+  if (projects.length >= 2 && (await listHivePages("concepts")).length === 0) {
+    nudges.push({
+      reason: `${projects.length} projects, concepts/ still empty`,
+      command: "clauth hive --synthesize",
+    });
   }
 
-  const allPages = await listAllPages();
-  const neverRead = allPages.filter((p) => !pageHits[p]).sort();
-
-  return { sessionsWithMap, sessionsThatRead, pageHits, neverRead, scannedSessions, since };
-}
-
-// --- summary backfill ---
-
-export interface HiveBackfillResult extends HiveAnalysisResult {
-  /** Pages whose prose changed. Backfill must only touch frontmatter, so any entry here is a fault. */
-  bodiesChanged: string[];
-  backupDir: string;
-}
-
-/** Every content page — the three top-level wiki files are not pages. */
-async function listAllPages(): Promise<string[]> {
-  const out: string[] = [];
-  for (const category of HIVE_CATEGORIES) {
-    const root = join(HIVE_DIR, category);
-    let entries;
-    try {
-      entries = await readdir(root, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith(".md")) {
-        out.push(`${category}/${entry.name}`);
-      } else if (entry.isDirectory()) {
-        try {
-          for (const file of await readdir(join(root, entry.name))) {
-            if (file.endsWith(".md")) out.push(`${category}/${entry.name}/${file}`);
-          }
-        } catch {
-          continue;
-        }
-      }
-    }
+  // Pages get moved, split and consolidated by the analyzer in the background,
+  // and a link left pointing at nothing is invisible from every direction.
+  const { broken } = await analyzeLinks();
+  if (broken.length > 0) {
+    nudges.push({
+      reason: broken.length === 1
+        ? "1 link points at a page that is gone"
+        : `${broken.length} links point at pages that are gone`,
+      command: "clauth hive --lint",
+    });
   }
-  return out.sort();
-}
 
-const stripFrontmatter = (s: string) => s.replace(/^---[\s\S]*?\n---\n?/, "").trim();
-
-async function snapshotBodies(): Promise<Record<string, string>> {
-  const snap: Record<string, string> = {};
-  for (const rel of await listAllPages()) {
-    const content = await readPage(join(HIVE_DIR, rel));
-    if (content !== null) snap[rel] = stripFrontmatter(content);
-  }
-  return snap;
-}
-
-/**
- * Fill in the `summary` frontmatter field across the wiki.
- *
- * The wiki is not version-controlled, so this copies it aside first and then
- * verifies that only frontmatter changed — an LLM editing 26 pages of
- * unversioned knowledge is otherwise an unbounded, unrecoverable edit.
- */
-export async function runHiveBackfillSummaries(
-  claudeConfigDir: string,
-  profileName: string,
-  stamp: string,
-  onEvent?: HiveOnEvent
-): Promise<HiveBackfillResult> {
-  const backupDir = join(BACKUP_DIR, stamp);
-  await mkdir(BACKUP_DIR, { recursive: true });
-  await cp(HIVE_DIR, backupDir, { recursive: true });
-  await pruneBackups();
-
-  const before = await snapshotBodies();
-
-  const prompt = [
-    `You are backfilling the \`summary\` frontmatter field across the knowledge wiki at ${HIVE_DIR}/.`,
-    `Read CLAUDE.md there first — the "summary field — hard rules" section governs this task.`,
-    `Process EVERY page under projects/, concepts/, clients/, company/, personal/ and people/.`,
-    `Do NOT touch CLAUDE.md, index.md or log.md.`,
-    `For each page: add a \`summary:\` line to its YAML frontmatter, or rewrite the existing one if it breaks the rules.`,
-    `STRICT CONSTRAINT: change nothing except the \`summary\` field. Do not edit page prose, headings, links, or any other frontmatter field. The prose is verified byte-for-byte afterwards and any change is reported as a fault.`,
-    `Each summary must be under 100 characters and must say what KIND of knowledge the page holds, not state a fact from it.`,
-    `Work through the pages systematically. When done, print a HIVE_SUMMARY line reporting how many pages you updated.`,
-  ].join(" ");
-
-  const result = await spawnHiveSession(prompt, [], claudeConfigDir, profileName, onEvent);
-
-  const after = await snapshotBodies();
-  const bodiesChanged = Object.keys(before).filter(
-    (rel) => after[rel] === undefined || after[rel] !== before[rel]
-  );
-
-  return { ...result, bodiesChanged, backupDir };
+  return nudges;
 }
 
 export interface HiveSynthesisResult extends HiveAnalysisResult {

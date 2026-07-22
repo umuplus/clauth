@@ -74,16 +74,22 @@ import {
   resetHiveProject,
   resetHivePage,
   resetHiveAll,
-  runHiveBackfillSummaries,
   runHiveSynthesize,
   runHiveAnswers,
-  computeHiveUsage,
   analyzeLinks,
+  getHiveNudges,
   listRecentSessions,
   FLAT_CATEGORIES,
   type HiveCategory,
   type SchemaUpgrade,
 } from "./hive.js";
+
+// A reader that goes away mid-write — `| head`, quitting `less` — is normal use
+// of a CLI, not a fault. Without this, node turns the closed pipe into an
+// unhandled error event and prints a stack trace over the output.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code !== "EPIPE") throw err;
+});
 
 function confirm(prompt: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -528,10 +534,7 @@ program
   .option("--open", "Open the wiki directory in the system file manager")
   .option("--obsidian", "Open the wiki in Obsidian (requires Obsidian 1.0+)")
   .option("--reset [target]", "Delete a project, a <category>/<page>, or the entire wiki if no target is given")
-  .option("--backfill-summaries", "Fill in the summary frontmatter field across every wiki page")
   .option("--synthesize", "Extract cross-project patterns into concepts/ pages")
-  .option("--links", "Check the wiki link graph: broken links, one-way pairs, orphans")
-  .option("--usage", "Show whether sessions actually open the wiki pages they are pointed at")
   .option("--questions", "Answer the questions the wiki has for you")
   .option("--clear", "Dismiss every open question (use with --questions)")
   .option("--queue", "Show sessions waiting to be analysed")
@@ -544,7 +547,7 @@ program
   .action(async (prompt: string | undefined, opts: {
     query?: boolean; lint?: boolean; file?: string;
     index?: boolean; log?: string | boolean; open?: boolean; obsidian?: boolean;
-    reset?: string | boolean; yes?: boolean; backfillSummaries?: boolean; synthesize?: boolean; links?: boolean; usage?: boolean;
+    reset?: string | boolean; yes?: boolean; synthesize?: boolean;
     questions?: boolean; clear?: boolean;
     queue?: boolean; catchup?: boolean; sessions?: string | boolean; retryFailed?: boolean; clearFailed?: boolean; quiet?: boolean;
   }) => {
@@ -612,6 +615,19 @@ program
 
         await doReset();
         console.log(chalk.green(`  ✓ ${doneMsg}`));
+
+        // Deleting pages leaves every link into them dangling, and nothing else
+        // would ever tell you: the wiki is a folder you don't open. The check is
+        // deterministic and instant, so it runs here rather than waiting to be
+        // remembered. Concept pages cite two projects each by rule, so resetting
+        // one project typically breaks all of them.
+        const after = await analyzeLinks();
+        if (after.broken.length > 0) {
+          console.log(chalk.yellow(`\n  ⚠ ${after.broken.length} link(s) now point at pages that are gone:`));
+          after.broken.slice(0, 15).forEach((b) => console.log(chalk.dim(`    ${b.from} → ${b.to}`)));
+          if (after.broken.length > 15) console.log(chalk.dim(`    … and ${after.broken.length - 15} more`));
+          console.log(chalk.dim("  Clean them up with: clauth hive --lint"));
+        }
         return;
       }
 
@@ -901,97 +917,6 @@ program
         return;
       }
 
-      if (opts.links) {
-        const r = await analyzeLinks();
-
-        console.log(chalk.bold(`\n  Link check — ${r.pages} pages\n`));
-
-        if (r.broken.length === 0 && r.oneWay.length === 0 && r.orphans.length === 0) {
-          console.log(chalk.green("  Clean: no broken links, no one-way pairs, no orphans.\n"));
-          return;
-        }
-
-        if (r.broken.length > 0) {
-          console.log(chalk.red(`  Broken links (${r.broken.length}) — the target does not exist`));
-          r.broken.forEach((b) => console.log(chalk.red(`    ${b.from} → ${b.to}`)));
-          console.log(chalk.dim("  Usually left behind by a page that was moved or reset.\n"));
-        }
-
-        if (r.oneWay.length > 0) {
-          console.log(chalk.yellow(`  One-way links (${r.oneWay.length}) — no link back`));
-          r.oneWay.slice(0, 20).forEach((o) => console.log(chalk.dim(`    ${o.from} → ${o.to}`)));
-          if (r.oneWay.length > 20) console.log(chalk.dim(`    … and ${r.oneWay.length - 20} more`));
-          console.log(chalk.dim("  The schema asks for both directions; a missing backlink means the\n  page is invisible from the other side.\n"));
-        }
-
-        if (r.orphans.length > 0) {
-          console.log(chalk.yellow(`  Orphan pages (${r.orphans.length}) — nothing links to them`));
-          r.orphans.forEach((o) => console.log(chalk.dim(`    ${o}`)));
-          console.log();
-        }
-
-        // Broken links are a defect; the rest is advisory. Exit code lets this
-        // be used as a check after edits without reading the output.
-        if (r.broken.length > 0) process.exit(1);
-        return;
-      }
-
-      if (opts.usage) {
-        // Only profiles with hive mind on ever get a map injected.
-        const profiles = await getProfilesWithStatus();
-        const enabled: string[] = [];
-        for (const p of profiles) {
-          const cfg = await getConfig(p.name);
-          if (cfg.hiveMind?.enabled) enabled.push(p.name);
-        }
-
-        if (enabled.length === 0) {
-          console.log(chalk.dim("  No profile has hive mind enabled — nothing to measure."));
-          console.log(chalk.dim("  Enable it with: clauth config <name> --hive-mind"));
-          return;
-        }
-
-        const usage = await computeHiveUsage(enabled.map((n) => getClaudeConfigDir(n)));
-
-        console.log(chalk.bold("\n  Hive usage\n"));
-        console.log(chalk.dim(`  Profiles: ${enabled.join(", ")}`));
-        console.log(chalk.dim(`  Sessions scanned: ${usage.scannedSessions}${usage.since ? ` (since ${usage.since.slice(0, 10)})` : ""}`));
-
-        if (usage.sessionsWithMap === 0) {
-          console.log(chalk.dim("\n  No sessions yet in a project that has wiki pages."));
-          console.log(chalk.dim("  Run a few sessions with hive mind on, then check again.\n"));
-          return;
-        }
-
-        const pct = Math.round((usage.sessionsThatRead / usage.sessionsWithMap) * 100);
-        const colour = pct === 0 ? chalk.red : pct < 30 ? chalk.yellow : chalk.green;
-        console.log(
-          `\n  Sessions given a map:  ${usage.sessionsWithMap}` +
-          `\n  ...that opened a page: ${colour(`${usage.sessionsThatRead} (${pct}%)`)}\n`
-        );
-
-        const ranked = Object.entries(usage.pageHits).sort(([, a], [, b]) => b - a);
-        if (ranked.length > 0) {
-          console.log(chalk.bold("  Most-opened pages"));
-          ranked.slice(0, 10).forEach(([p, n]) => console.log(`    ${String(n).padStart(3)}  ${p}`));
-          console.log();
-        }
-
-        if (usage.neverRead.length > 0) {
-          console.log(chalk.bold(`  Never opened (${usage.neverRead.length})`));
-          usage.neverRead.slice(0, 10).forEach((p) => console.log(chalk.dim(`         ${p}`)));
-          if (usage.neverRead.length > 10) {
-            console.log(chalk.dim(`         … and ${usage.neverRead.length - 10} more`));
-          }
-          console.log();
-        }
-
-        console.log(chalk.dim("  Note: a session counts as \"given a map\" if its project has wiki"));
-        console.log(chalk.dim("  pages now, so sessions from before those pages existed inflate the"));
-        console.log(chalk.dim("  denominator. Treat low percentages as a signal, not a measurement.\n"));
-        return;
-      }
-
       // --- LLM-powered operations (need a profile for auth) ---
       const folder = await getFolderProfile();
       const profileName = folder ?? (await getLastUsed());
@@ -1001,33 +926,6 @@ program
       }
 
       const claudeDir = getClaudeConfigDir(profileName);
-
-      if (opts.backfillSummaries) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        console.log(chalk.dim("  hive: backing up wiki and backfilling summaries..."));
-        const res = await runHiveBackfillSummaries(claudeDir, profileName, stamp, (ev) => {
-          if (ev.kind === "tool") {
-            console.log(chalk.dim(ev.detail ? `  hive · ${ev.name} ${ev.detail}` : `  hive · ${ev.name}`));
-          }
-        });
-
-        if (res.error) {
-          console.log(chalk.red("  hive: backfill failed"));
-          console.log(chalk.red(res.error));
-        } else {
-          console.log(chalk.dim(`  hive: ${res.summary ?? "done"}`));
-        }
-
-        if (res.bodiesChanged.length > 0) {
-          console.log(chalk.yellow(`\n  ⚠ ${res.bodiesChanged.length} page(s) had prose modified, not just frontmatter:`));
-          res.bodiesChanged.forEach((p) => console.log(chalk.yellow(`    ${p}`)));
-          console.log(chalk.dim(`  Restore from: ${res.backupDir}`));
-        } else {
-          console.log(chalk.dim("  Verified: only frontmatter changed."));
-          console.log(chalk.dim(`  Backup: ${res.backupDir}`));
-        }
-        return;
-      }
 
       if (opts.synthesize) {
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1167,6 +1065,7 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
   const config = await getConfig(name);
   const configArgs: string[] = [];
   const flags: string[] = [];
+  let hints: { reason: string; command: string }[] = [];
   if (config.skipPermissions) {
     configArgs.push("--dangerously-skip-permissions");
     flags.push("skip-permissions");
@@ -1183,11 +1082,13 @@ async function launchClaude(name: string, args: string[]): Promise<void> {
     // Questions wait for the user, so they surface where the user already looks.
     const open = openQuestions(await readQuestions());
     if (open.length > 0) flags.push(`${open.length} question${open.length > 1 ? "s" : ""}`);
+
+    hints = await getHiveNudges();
   }
 
   await setLastUsed(name);
   await setFolderProfile(name);
-  printLaunchBanner(name, flags);
+  printLaunchBanner(name, flags, hints);
 
   const claudeDir = getClaudeConfigDir(name);
   const env = { ...process.env };

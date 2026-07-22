@@ -45,9 +45,16 @@ export function formatProfileLine(
   return `  ${cursor} ${dot} ${name}  ${badges.join(chalk.dim(" · "))}`;
 }
 
+/**
+ * Flags are state (what is true right now); hints are actions the user could
+ * take. They print outside the box because the box is identity — a suggestion
+ * that looks like part of the profile's name reads as permanent, and a
+ * permanent-looking suggestion is one people stop seeing.
+ */
 export function printLaunchBanner(
   name: string,
-  flags: string[]
+  flags: string[],
+  hints: { reason: string; command: string }[] = []
 ): void {
   const label = `▶ ${name}`;
   const flagLine = flags.length > 0 ? flags.join(" · ") : "";
@@ -60,5 +67,8 @@ export function printLaunchBanner(
     console.log(brand(`  │  `) + chalk.dim(flagLine.padEnd(contentWidth - 2)) + brand(`│`));
   }
   console.log(brand(`  ╰${"─".repeat(contentWidth)}╯`));
+  for (const hint of hints) {
+    console.log(`  ${chalk.cyan(hint.command)}  ${chalk.dim(`— ${hint.reason}`)}`);
+  }
   console.log();
 }
