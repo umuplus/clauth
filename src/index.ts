@@ -46,6 +46,7 @@ import {
   readRunning,
   retryFailed,
   clearFailed,
+  spawnQueueWorker,
   MAX_ATTEMPTS,
 } from "./hive-queue.js";
 import {
@@ -203,19 +204,6 @@ function parseSelection(input: string, max: number): number[] {
     if (single >= 1 && single <= max) picked.add(single);
   }
   return [...picked].sort((a, b) => a - b);
-}
-
-/**
- * Start the queue worker as a detached child so the terminal returns immediately.
- * If it dies (sleep, closed terminal, crash) the item simply stays queued and is
- * picked up by the next worker — the queue, not the process, is the source of truth.
- */
-function spawnQueueWorker(): void {
-  const child = spawn(process.execPath, [process.argv[1], "hive", "--catchup", "--quiet"], {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
 }
 
 /** Stream a run's tool calls as dim progress lines. Silent in quiet mode. */

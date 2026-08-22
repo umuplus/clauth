@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { readFile, writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { open } from "node:fs/promises";
 import { getClauthDir } from "./profiles.js";
@@ -226,4 +227,20 @@ export async function clearFailed(): Promise<number> {
   state.failed = [];
   await writeQueue(state);
   return count;
+}
+
+/**
+ * Start the queue worker as a detached child so the caller returns immediately.
+ * If it dies (sleep, closed terminal, crash) the item simply stays queued and is
+ * picked up by the next worker — the queue, not the process, is the source of truth.
+ *
+ * Lives here rather than in the CLI because the UI server starts it too: answering
+ * a question in the browser has to write into the wiki the same way the CLI does.
+ */
+export function spawnQueueWorker(): void {
+  const child = spawn(process.execPath, [process.argv[1], "hive", "--catchup", "--quiet"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
 }

@@ -7,6 +7,7 @@ import type {
   HiveBackfillResult,
   HiveStreamEvent,
   QueueState,
+  QuestionState,
   StatsCache,
 } from "./types";
 
@@ -98,6 +99,25 @@ export const api = {
     request<{ requeued: number }>("/api/hive/queue/retry-failed", { method: "POST" }),
   clearFailedQueue: () =>
     request<{ dropped: number }>("/api/hive/queue/clear-failed", { method: "POST" }),
+
+  // Questions the wiki has for the owner
+  getHiveQuestions: () => request<QuestionState>("/api/hive/questions"),
+  answerHiveQuestion: (id: string, answer: string) =>
+    request<{ answered: string }>(`/api/hive/questions/${encodeURIComponent(id)}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ answer }),
+    }),
+  dismissHiveQuestion: (id: string) =>
+    request<{ dismissed: string }>(`/api/hive/questions/${encodeURIComponent(id)}/dismiss`, {
+      method: "POST",
+    }),
+  dismissAllHiveQuestions: () =>
+    request<{ dismissed: number }>("/api/hive/questions/dismiss-all", { method: "POST" }),
+  applyHiveAnswers: () =>
+    request<{ started: boolean; waiting: number; running: { pid: number; startedAt: string } | null }>(
+      "/api/hive/questions/apply",
+      { method: "POST" }
+    ),
 
   // Hive reset (destructive)
   listHiveProjects: () => request<{ projects: string[] }>("/api/hive/projects"),

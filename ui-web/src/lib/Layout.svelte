@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { currentRoute, navigate } from "./stores";
+  import { onMount } from "svelte";
+  import { api } from "./api";
+  import { currentRoute, navigate, openQuestionCount } from "./stores";
 
   interface NavItem {
     label: string;
@@ -12,6 +14,7 @@
     { label: "Hive", path: "/hive", icon: "⬡" },
     { label: "Feed", path: "/hive/feed", icon: "↓" },
     { label: "Query", path: "/hive/query", icon: "?" },
+    { label: "Questions", path: "/hive/questions", icon: "!" },
     { label: "Graph", path: "/hive/graph", icon: "⌘" },
     { label: "Profiles", path: "/profiles", icon: "⚙" },
     { label: "Stats", path: "/stats", icon: "▤" },
@@ -23,6 +26,17 @@
   }
 
   let { children } = $props();
+
+  // The count is only read here, so the badge is right on first paint of any
+  // page; the Questions view keeps the store current as answers are given.
+  onMount(async () => {
+    try {
+      const state = await api.getHiveQuestions();
+      openQuestionCount.set(state.open.length);
+    } catch {
+      /* a missing queue is not worth an error in the shell */
+    }
+  });
 </script>
 
 <div class="min-h-screen flex">
@@ -44,6 +58,9 @@
         >
           <span class="w-4 text-center text-neutral-500">{item.icon}</span>
           <span>{item.label}</span>
+          {#if item.path === "/hive/questions" && $openQuestionCount > 0}
+            <span class="badge bg-accent/15 text-accent ml-auto">{$openQuestionCount}</span>
+          {/if}
         </button>
       {/each}
     </nav>

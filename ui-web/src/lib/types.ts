@@ -51,6 +51,30 @@ export interface QueueState {
   running: { pid: number; startedAt: string } | null;
 }
 
+export type QuestionStatus = "open" | "answered" | "applied" | "dismissed";
+
+export interface Question {
+  id: string;
+  question: string;
+  /** Wiki-relative page carrying the gap this question would close. */
+  page: string | null;
+  /** What the analyzer would write differently once it knows. */
+  why: string | null;
+  source: string;
+  askedAt: string;
+  answer?: string;
+  answeredAt?: string;
+  appliedAt?: string;
+  status: QuestionStatus;
+}
+
+export interface QuestionState {
+  open: Question[];
+  /** Answered but not yet written into the wiki. */
+  answered: Question[];
+  running: { pid: number; startedAt: string } | null;
+}
+
 export type HiveStreamEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; detail?: string }

@@ -4,6 +4,8 @@ import type { Profile, WikiPage } from "./types";
 export const profiles = writable<Profile[]>([]);
 export const wikiPages = writable<WikiPage[]>([]);
 export const currentRoute = writable<string>(location.hash.slice(1) || "/");
+/** Open questions waiting on the owner — drives the badge in the sidebar. */
+export const openQuestionCount = writable<number>(0);
 
 if (typeof window !== "undefined") {
   window.addEventListener("hashchange", () => {

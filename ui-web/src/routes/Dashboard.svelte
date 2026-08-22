@@ -2,27 +2,31 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api";
   import { profiles } from "../lib/stores";
-  import type { LogEntry, WikiPage, QueueState } from "../lib/types";
-  import { navigate } from "../lib/stores";
+  import type { LogEntry, WikiPage, QueueState, Question } from "../lib/types";
+  import { navigate, openQuestionCount } from "../lib/stores";
 
   let pages = $state<WikiPage[]>([]);
   let log = $state<LogEntry[]>([]);
   let queue = $state<QueueState | null>(null);
+  let questions = $state<Question[]>([]);
   let queueBusy = $state(false);
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      const [p, pg, l, q] = await Promise.all([
+      const [p, pg, l, q, qs] = await Promise.all([
         api.listProfiles(),
         api.listWikiPages(),
         api.getHiveLog(10),
         api.getHiveQueue(),
+        api.getHiveQuestions(),
       ]);
       profiles.set(p.profiles);
       pages = pg.pages;
       log = l.entries;
       queue = q;
+      questions = qs.open;
+      openQuestionCount.set(qs.open.length);
     } finally {
       loading = false;
     }
@@ -81,6 +85,22 @@
     <h1 class="text-2xl font-semibold mb-1">Dashboard</h1>
     <p class="text-sm text-neutral-400">Overview of your Hive Mind wiki and profiles.</p>
   </div>
+
+  {#if questions.length > 0}
+    <div class="card mb-6 border-sky-900">
+      <div class="text-xs uppercase tracking-wider text-neutral-500 mb-2">Questions for you</div>
+      <p class="text-sm text-neutral-300 mb-2">
+        {questions.length} thing{questions.length > 1 ? "s" : ""} the wiki could not work out on its own.
+      </p>
+      <ul class="text-xs text-neutral-500 mb-3">
+        {#each questions.slice(0, 3) as q}
+          <li>{q.question}</li>
+        {/each}
+        {#if questions.length > 3}<li>… and {questions.length - 3} more</li>{/if}
+      </ul>
+      <button class="btn-primary text-sm" onclick={() => navigate("/hive/questions")}>Answer them</button>
+    </div>
+  {/if}
 
   {#if queue && (queue.pending.length > 0 || queue.failed.length > 0)}
     <div class="card mb-6 {queue.failed.length > 0 ? 'border-yellow-800' : ''}">

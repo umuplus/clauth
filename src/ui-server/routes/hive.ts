@@ -19,7 +19,21 @@ import {
   type HiveStreamEvent,
   type HiveAnalysisResult,
 } from "../../hive.js";
-import { readQueue, readRunning, retryFailed, clearFailed } from "../../hive-queue.js";
+import {
+  readQueue,
+  readRunning,
+  retryFailed,
+  clearFailed,
+  spawnQueueWorker,
+} from "../../hive-queue.js";
+import {
+  readQuestions,
+  openQuestions,
+  unappliedAnswers,
+  answerQuestion,
+  dismissQuestion,
+  dismissAllOpen,
+} from "../../hive-questions.js";
 import {
   getClaudeConfigDir,
   getFolderProfile,
@@ -145,6 +159,74 @@ hiveRoutes.post("/queue/retry-failed", async (c) => {
 
 hiveRoutes.post("/queue/clear-failed", async (c) => {
   return c.json({ dropped: await clearFailed() });
+});
+
+// --- questions the wiki has for the owner ---
+//
+// The same queue `clauth hive --questions` walks. Answering here writes the
+// answer to the same file and starts the same background worker, so the two
+// front ends stay interchangeable — answer some in the terminal, the rest here.
+
+hiveRoutes.get("/questions", async (c) => {
+  const state = await readQuestions();
+  return c.json({
+    open: openQuestions(state),
+    answered: unappliedAnswers(state),
+    running: await readRunning(),
+  });
+});
+
+hiveRoutes.post("/questions/dismiss-all", async (c) => {
+  return c.json({ dismissed: await dismissAllOpen() });
+});
+
+/**
+ * Fold the answers already given into the wiki. Separate from answering so the
+ * owner can work through several questions and pay for one analyzer pass, which
+ * is what the terminal loop does at the end of its run.
+ */
+hiveRoutes.post("/questions/apply", async (c) => {
+  const state = await readQuestions();
+  const waiting = unappliedAnswers(state).length;
+  if (waiting === 0) return c.json({ started: false, waiting: 0, running: null });
+
+  // Read the lock before spawning, or the worker we are about to start is
+  // itself the "analysis in progress" this reports.
+  const running = await readRunning();
+  spawnQueueWorker();
+  return c.json({ started: true, waiting, running });
+});
+
+hiveRoutes.post("/questions/:id/answer", async (c) => {
+  const id = c.req.param("id");
+  let answer: unknown;
+  try {
+    ({ answer } = await c.req.json<{ answer?: unknown }>());
+  } catch {
+    answer = undefined;
+  }
+  if (typeof answer !== "string" || !answer.trim()) {
+    return c.json({ error: "answer is required" }, 400);
+  }
+
+  const state = await readQuestions();
+  if (!state.questions.some((q) => q.id === id)) {
+    return c.json({ error: `no question "${id}"` }, 404);
+  }
+
+  await answerQuestion(id, answer);
+  return c.json({ answered: id });
+});
+
+hiveRoutes.post("/questions/:id/dismiss", async (c) => {
+  const id = c.req.param("id");
+  const state = await readQuestions();
+  if (!state.questions.some((q) => q.id === id)) {
+    return c.json({ error: `no question "${id}"` }, 404);
+  }
+
+  await dismissQuestion(id);
+  return c.json({ dismissed: id });
 });
 
 // --- reset endpoints (destructive, no LLM) ---

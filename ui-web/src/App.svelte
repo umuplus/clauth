@@ -5,6 +5,7 @@
   import HiveBrowser from "./routes/HiveBrowser.svelte";
   import HiveFeed from "./routes/HiveFeed.svelte";
   import HiveQuery from "./routes/HiveQuery.svelte";
+  import HiveQuestions from "./routes/HiveQuestions.svelte";
   import HiveGraph from "./routes/HiveGraph.svelte";
   import Stats from "./routes/Stats.svelte";
   import { currentRoute } from "./lib/stores";
@@ -18,6 +19,7 @@
     if (route === "/hive") return { component: HiveBrowser, params: {} };
     if (route === "/hive/feed") return { component: HiveFeed, params: {} };
     if (route === "/hive/query") return { component: HiveQuery, params: {} };
+    if (route === "/hive/questions") return { component: HiveQuestions, params: {} };
     if (route === "/hive/graph") return { component: HiveGraph, params: {} };
     if (route === "/stats") return { component: Stats, params: {} };
     if (route.startsWith("/hive/page/")) {
